@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Grok Chat</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="logo">✦</span>
+          <span>Grok Chat</span>
+        </div>
+        <div class="meta">
+          <span id="model-badge" class="badge">…</span>
+          <button id="clear-btn" class="ghost-btn" title="대화 초기화">초기화</button>
+        </div>
+      </header>
+
+      <main id="messages" class="messages">
+        <div class="empty" id="empty-state">
+          <h1>무엇을 도와드릴까요?</h1>
+          <p>xAI Grok에게 무엇이든 물어보세요.</p>
+        </div>
+      </main>
+
+      <form id="composer" class="composer">
+        <textarea
+          id="input"
+          class="input"
+          rows="1"
+          placeholder="메시지를 입력하세요…  (Enter 전송 · Shift+Enter 줄바꿈)"
+          autocomplete="off"
+        ></textarea>
+        <button id="send-btn" class="send-btn" type="submit" aria-label="전송">
+          ➤
+        </button>
+      </form>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
