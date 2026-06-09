@@ -1,4 +1,35 @@
-node_modules/
+# --- Secrets (xAI key lives here locally; goes to Supabase secrets, never git) ---
 .env
-npm-debug.log*
+
+# --- Flutter / Dart ---
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+build/
+*.iml
+.pub-cache/
+.pub/
+**/doc/api/
+coverage/
+
+# Android
+android/.gradle/
+android/.kotlin/
+android/captures/
+android/local.properties
+android/key.properties
+*.keystore
+*.jks
+**/GeneratedPluginRegistrant.*
+
+# IDE
+.idea/
+.vscode/
+
+# --- Supabase ---
+supabase/.temp/
+supabase/.branches/
+
+# --- Misc ---
 .DS_Store
+npm-debug.log*
