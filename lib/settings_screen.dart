@@ -40,7 +40,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(height: 4),
           const Text(
-            'Supabase 대시보드 → Project Settings → API 에서 값을 복사하세요. '
+            '기본값이 앱에 내장돼 있어 입력하지 않아도 바로 동작합니다. '
+            '다른 Supabase 프로젝트로 바꿀 때만 여기서 덮어쓰세요. '
             'xAI 키는 여기에 넣지 않습니다(서버 시크릿에 보관됨).',
             style: TextStyle(fontSize: 12, color: Colors.white60),
           ),

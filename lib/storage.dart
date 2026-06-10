@@ -4,6 +4,7 @@
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'models.dart';
+import 'config.dart';
 
 class Store {
   static const _kConversations = 'conversations';
@@ -70,8 +71,18 @@ class Store {
   }
 
   // --- Settings -------------------------------------------------------------
-  String get supabaseUrl => _prefs.getString(_kSupabaseUrl) ?? '';
-  String get anonKey => _prefs.getString(_kAnonKey) ?? '';
+  // Falls back to the values baked into config.dart, so the app works with no
+  // setup. A stored value (entered in Settings) overrides the default.
+  String get supabaseUrl {
+    final v = _prefs.getString(_kSupabaseUrl) ?? '';
+    return v.isNotEmpty ? v : kSupabaseUrl;
+  }
+
+  String get anonKey {
+    final v = _prefs.getString(_kAnonKey) ?? '';
+    return v.isNotEmpty ? v : kSupabaseAnonKey;
+  }
+
   bool get isConfigured => supabaseUrl.isNotEmpty && anonKey.isNotEmpty;
 
   Future<void> setSettings(String url, String key) async {
