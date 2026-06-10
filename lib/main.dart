@@ -1,12 +1,15 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'models.dart';
 import 'storage.dart';
 import 'chat_service.dart';
 import 'settings_screen.dart';
 import 'credits_screen.dart';
+import 'login_screen.dart';
 import 'supa.dart';
 
 final store = Store();
@@ -14,14 +17,10 @@ final store = Store();
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await store.init();
-  // 설정돼 있으면 Supabase 초기화 + 익명 로그인을 미리 수행.
-  if (store.isConfigured) {
-    try {
-      await initSupabase(store.supabaseUrl, store.anonKey);
-      await ensureSession();
-    } catch (_) {
-      // 네트워크/설정 문제는 첫 전송 시 다시 시도된다.
-    }
+  try {
+    await initSupabase(store.supabaseUrl, store.anonKey);
+  } catch (_) {
+    // 네트워크 문제 시에도 앱은 뜬다(로그인 화면에서 재시도).
   }
   runApp(const GrokApp());
 }
@@ -51,8 +50,43 @@ class GrokApp extends StatelessWidget {
         appBarTheme: const AppBarTheme(backgroundColor: _bg, elevation: 0),
         drawerTheme: const DrawerThemeData(backgroundColor: Color(0xFF0A0C11)),
       ),
-      home: const ChatScreen(),
+      home: const AuthGate(),
     );
+  }
+}
+
+// Shows the login screen until a real (non-anonymous) Google session exists.
+class AuthGate extends StatefulWidget {
+  const AuthGate({super.key});
+  @override
+  State<AuthGate> createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<AuthGate> {
+  StreamSubscription<AuthState>? _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    // 남아있는 익명 세션은 제거(이제 Google 로그인만 사용).
+    final u = Supabase.instance.client.auth.currentUser;
+    if (u != null && u.isAnonymous) {
+      Supabase.instance.client.auth.signOut();
+    }
+    _sub = Supabase.instance.client.auth.onAuthStateChange.listen((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return isLoggedIn ? const ChatScreen() : const LoginScreen();
   }
 }
 
@@ -91,25 +125,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _input.text.trim();
     if (text.isEmpty || _streaming) return;
 
-    if (!store.isConfigured) {
-      _openSettings(prompt: true);
-      return;
-    }
-
-    // 익명 세션 보장(부팅 때 실패했어도 여기서 재시도).
-    String? token;
-    try {
-      if (!supabaseInited) await initSupabase(store.supabaseUrl, store.anonKey);
-      token = await ensureSession();
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('로그인 실패: $e'),
-          backgroundColor: Colors.red[900],
-        ));
-      }
-      return;
-    }
+    // 로그인 게이트를 통과했으므로 세션이 있다.
+    final token = currentAccessToken();
+    if (token == null) return; // 안전장치
 
     _input.clear();
     final conv = store.ensureActive();
@@ -203,6 +221,10 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Future<void> _logout() async {
+    await signOut(); // AuthGate가 로그인 화면으로 전환.
+  }
+
   void _newChat() {
     setState(() => store.createConversation());
     Navigator.pop(context); // close drawer
@@ -262,12 +284,14 @@ class _ChatScreenState extends State<ChatScreen> {
               if (v == 'json') _export(true);
               if (v == 'credits') _openCredits();
               if (v == 'settings') _openSettings();
+              if (v == 'logout') _logout();
             },
             itemBuilder: (_) => const [
               PopupMenuItem(value: 'md', child: Text('Markdown 내보내기')),
               PopupMenuItem(value: 'json', child: Text('JSON 내보내기')),
               PopupMenuItem(value: 'credits', child: Text('크레딧')),
               PopupMenuItem(value: 'settings', child: Text('설정')),
+              PopupMenuItem(value: 'logout', child: Text('로그아웃')),
             ],
           ),
         ],

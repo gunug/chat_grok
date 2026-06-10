@@ -43,6 +43,7 @@ dependencies:
   shared_preferences: ^2.3.2
   # Share/save exported conversations (Markdown / JSON).
   share_plus: ^10.1.2
+  google_sign_in: ^7.2.0
 
 dev_dependencies:
   flutter_test:
