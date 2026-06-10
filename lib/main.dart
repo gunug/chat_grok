@@ -6,6 +6,7 @@ import 'models.dart';
 import 'storage.dart';
 import 'chat_service.dart';
 import 'settings_screen.dart';
+import 'credits_screen.dart';
 import 'supa.dart';
 
 final store = Store();
@@ -195,6 +196,13 @@ class _ChatScreenState extends State<ChatScreen> {
     if (mounted) setState(() {});
   }
 
+  Future<void> _openCredits() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const CreditsScreen()),
+    );
+  }
+
   void _newChat() {
     setState(() => store.createConversation());
     Navigator.pop(context); // close drawer
@@ -252,11 +260,13 @@ class _ChatScreenState extends State<ChatScreen> {
             onSelected: (v) {
               if (v == 'md') _export(false);
               if (v == 'json') _export(true);
+              if (v == 'credits') _openCredits();
               if (v == 'settings') _openSettings();
             },
             itemBuilder: (_) => const [
               PopupMenuItem(value: 'md', child: Text('Markdown 내보내기')),
               PopupMenuItem(value: 'json', child: Text('JSON 내보내기')),
+              PopupMenuItem(value: 'credits', child: Text('크레딧')),
               PopupMenuItem(value: 'settings', child: Text('설정')),
             ],
           ),

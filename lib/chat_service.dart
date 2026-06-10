@@ -54,6 +54,11 @@ class ChatService {
 
       if (resp.statusCode != 200) {
         final body = await resp.stream.bytesToString();
+        // 크레딧 부족은 별도 안내(충전 유도).
+        if (resp.statusCode == 402) {
+          yield ChatEvent.error('크레딧이 부족합니다. 충전 후 다시 시도하세요.');
+          return;
+        }
         String msg = 'HTTP ${resp.statusCode}';
         try {
           final j = jsonDecode(body);
