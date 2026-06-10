@@ -35,6 +35,8 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
 
+  # Supabase auth (anonymous sign-in now; Google OAuth later) + client.
+  supabase_flutter: ^2.8.0
   # HTTP client (used for the streaming SSE request to the Supabase function).
   http: ^1.2.2
   # Local persistence for conversations + settings (Supabase URL / anon key).

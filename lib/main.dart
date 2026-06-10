@@ -6,12 +6,22 @@ import 'models.dart';
 import 'storage.dart';
 import 'chat_service.dart';
 import 'settings_screen.dart';
+import 'supa.dart';
 
 final store = Store();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await store.init();
+  // 설정돼 있으면 Supabase 초기화 + 익명 로그인을 미리 수행.
+  if (store.isConfigured) {
+    try {
+      await initSupabase(store.supabaseUrl, store.anonKey);
+      await ensureSession();
+    } catch (_) {
+      // 네트워크/설정 문제는 첫 전송 시 다시 시도된다.
+    }
+  }
   runApp(const GrokApp());
 }
 
@@ -85,6 +95,21 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
+    // 익명 세션 보장(부팅 때 실패했어도 여기서 재시도).
+    String? token;
+    try {
+      if (!supabaseInited) await initSupabase(store.supabaseUrl, store.anonKey);
+      token = await ensureSession();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('로그인 실패: $e'),
+          backgroundColor: Colors.red[900],
+        ));
+      }
+      return;
+    }
+
     _input.clear();
     final conv = store.ensureActive();
     conv.messages.add(Message('user', text));
@@ -108,6 +133,7 @@ class _ChatScreenState extends State<ChatScreen> {
       await for (final e in ChatService.stream(
         supabaseUrl: store.supabaseUrl,
         anonKey: store.anonKey,
+        accessToken: token,
         messages: history,
       )) {
         switch (e.type) {

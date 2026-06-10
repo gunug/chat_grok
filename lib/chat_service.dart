@@ -32,18 +32,21 @@ class ChatEvent {
 
 class ChatService {
   /// Sends [messages] and yields events as the answer streams in.
-  /// [supabaseUrl] e.g. https://abcd.supabase.co ; [anonKey] = project anon key.
+  /// [supabaseUrl] e.g. https://abcd.supabase.co ; [anonKey] = project anon key
+  /// (sent as the gateway apikey); [accessToken] = the signed-in (anonymous)
+  /// user's JWT, sent as the Bearer so the function sees an authenticated user.
   static Stream<ChatEvent> stream({
     required String supabaseUrl,
     required String anonKey,
     required List<Map<String, dynamic>> messages,
+    String? accessToken,
   }) async* {
     final uri = Uri.parse('$supabaseUrl/functions/v1/chat');
     final client = http.Client();
     try {
       final req = http.Request('POST', uri);
       req.headers['Content-Type'] = 'application/json';
-      req.headers['Authorization'] = 'Bearer $anonKey';
+      req.headers['Authorization'] = 'Bearer ${accessToken ?? anonKey}';
       req.headers['apikey'] = anonKey;
       req.body = jsonEncode({'messages': messages});
 
