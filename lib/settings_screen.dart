@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'storage.dart';
+import 'credits.dart';
 
 class SettingsScreen extends StatefulWidget {
   final Store store;
@@ -30,7 +31,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('설정')),
+      appBar: AppBar(
+        title: const Text('설정'),
+        actions: const [CreditBadge()],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [

@@ -23,8 +23,8 @@ chat_grok과 Planlet은 **하나의 Supabase 프로젝트(`oerrgsanrnelhvgikgkv`
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const SERVICE_KEY = "chat_grok";
-const TRIAL_MICROS = 100_000;       // $0.10 첫 사용 체험 (조정 가능)
-const MIN_BALANCE_MICROS = 20_000;  // 호출 전 최소 잔액 버퍼
+const TRIAL_CREDITS = 100;       // 첫 사용 체험 크레딧 (1크레딧=1원 기준, 조정 가능)
+const MIN_BALANCE_CREDITS = 1;   // 호출 전 최소 잔액(크레딧)
 ```
 
 ### 1-b. 핸들러에서 xAI 호출 **전에** 인증 + 잔액 게이트
@@ -46,24 +46,26 @@ const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
 
 // 첫 사용 시 등록 + 체험크레딧, 그다음 잔액 게이트
 await admin.rpc("app_register_service", {
-  p_user: user.id, p_service: SERVICE_KEY, p_trial_micros: TRIAL_MICROS,
+  p_user: user.id, p_service: SERVICE_KEY, p_trial_credits: TRIAL_CREDITS,
 });
 const { data: credit } = await admin
-  .from("app_service_credits").select("balance_micros")
+  .from("app_service_credits").select("balance_credits")
   .eq("user_id", user.id).eq("service_key", SERVICE_KEY).maybeSingle();
-const balance = credit?.balance_micros ?? 0;
-if (balance < MIN_BALANCE_MICROS) {
-  return json({ error: "insufficient_credit", balanceMicros: balance }, 402);
+const balance = credit?.balance_credits ?? 0;
+if (balance < MIN_BALANCE_CREDITS) {
+  return json({ error: "insufficient_credit", balanceCredits: balance }, 402);
 }
 ```
 
-### 1-c. 스트림의 usage 청크에서 **실제 비용 차감**
+### 1-c. 스트림의 usage 청크에서 **원가 전달 → RPC가 배율 적용해 크레딧 차감**
 chat_grok은 이미 xAI의 `cost_in_usd_ticks`(1 USD = 1e10 ticks)를 받는다 — 이게 정확한
-원가다. `if (chunk.usage) { ... }` 블록 안에 추가:
+**원가(micro-USD)**다. **원가만 넘기면 `app_record_usage`가 `app_pricing`의 판매 배율을
+적용해 차감 크레딧을 계산·차감하고, 새 잔액(크레딧)을 돌려준다.**
+`if (chunk.usage) { ... }` 블록 안에 추가:
 ```ts
 const costUsd = u.cost_in_usd_ticks != null ? u.cost_in_usd_ticks / 1e10 : 0;
-const costMicros = Math.ceil(costUsd * 1e6);
-// 차감 + 로그 (스트림 내 비동기 호출)
+const costMicros = Math.ceil(costUsd * 1e6); // 원가(micro-USD). 배율은 RPC가 적용.
+// 배율 적용 차감 + 로그 (스트림 내 비동기 호출)
 admin.rpc("app_record_usage", {
   p_user: user.id, p_service: SERVICE_KEY, p_provider: "xai", p_model: XAI_MODEL,
   p_action: "chat",
@@ -71,7 +73,7 @@ admin.rpc("app_record_usage", {
   p_completion_tokens: u.completion_tokens ?? 0,
   p_cost_micros: costMicros,
 }).then(({ data }) => {
-  // 선택: 남은 잔액을 usage 이벤트에 실어 보내려면 여기서 send(...)
+  // data = 새 잔액(크레딧). usage 이벤트에 실어 보내려면 여기서 send(...)
 });
 ```
 > `user`/`admin`을 `ReadableStream` 콜백에서 쓰려면 둘 다 핸들러 스코프에 선언되어
@@ -100,24 +102,26 @@ if (auth.currentSession == null) {
 ```dart
 final c = await Supabase.instance.client
   .from('app_service_credits')
-  .select('balance_micros, total_purchased_micros, total_spent_micros')
+  .select('balance_credits, total_purchased_credits, total_spent_credits')
   .eq('service_key', 'chat_grok')
   .maybeSingle();
-final balanceUsd = (c?['balance_micros'] ?? 0) / 1e6;       // 잔액
-final spentUsd   = (c?['total_spent_micros'] ?? 0) / 1e6;   // 사용
-final paidUsd    = (c?['total_purchased_micros'] ?? 0) / 1e6; // 결제(크레딧)
+final balance = c?['balance_credits'] ?? 0;        // 잔액(크레딧)
+final spent   = c?['total_spent_credits'] ?? 0;    // 사용(크레딧)
+final paid    = c?['total_purchased_credits'] ?? 0;// 충전(크레딧)
+// 원 환산이 필요하면 rpc('app_credits_to_krw', {p_service:'chat_grok', p_credits: balance})
 ```
-402(`insufficient_credit`) 응답이 오면 충전 화면으로 유도.
+402(`insufficient_credit`, 본문에 `balanceCredits`) 응답이 오면 충전 화면으로 유도.
 
 ## 3. 가격 / 마진 (앱토큰)
-- **차감은 항상 원가**(`app_record_usage`의 cost_micros = xAI 실제 비용). Planlet과 동일.
-- **마진은 충전 비율에 둔다**: 사용자가 Play Billing으로 X원 결제 → `app_top_up(amount=결제액,
-  credit=원가예산)` 에서 `credit = 결제액 / (1+마진)` 으로 크레딧을 적게 준다. 차액이 마진.
-  → 사용 차감 로직은 두 앱 공통(원가)이라 단순하고, 마진은 판매 시점에만 산다.
+- **마진은 "소비"에 있다**: `app_record_usage`에 **원가(micro-USD)** 만 넘기면, RPC가
+  `app_pricing.sell_multiple_pct`(원가 대비 판매 배율)를 적용해 **차감 크레딧**을 계산한다.
+  → 두 앱 공통. chat_grok 함수는 원가만 정확히 넘기면 됨(xAI cost 사용).
+- **충전은 단순**: 결제 N원 → `floor(N ÷ krw_per_credit)` 크레딧. 마진 없음.
+- 배율·크레딧 단가는 **대시보드 `app_pricing`(service_key='chat_grok' 행)** 에서 조정.
 
 ## 4. 결제 (다음 단계)
-Play Billing 구매 → 검증 함수가 `app_top_up(user, 'chat_grok', 'play', purchaseToken,
-amount, credit)` 호출(멱등). Planlet과 동일 패턴 — 한쪽 만들면 복붙.
+Play Billing 구매 → 검증 함수가 `app_top_up(p_user, 'chat_grok', 'play', purchaseToken,
+p_krw_paid)` 호출(멱등 — 토큰 UNIQUE). 적립 크레딧은 RPC가 계산. Planlet과 동일 패턴.
 
 ## 5. 주의
 - **`supabase config push` 절대 금지**(공유 프로젝트 auth 설정 덮어씀). auth 변경은 대시보드.

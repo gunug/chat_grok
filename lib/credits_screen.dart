@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'credits.dart';
 
 // Shows this app's credit balance for the signed-in (anonymous) user.
 // Reads app_service_credits directly — RLS returns only the user's own row.
@@ -37,6 +38,7 @@ class _CreditsScreenState extends State<CreditsScreen> {
         _purchased = ((c?['total_purchased_micros'] ?? 0) as num) / 1e6;
         _loading = false;
       });
+      creditBalance.value = _balance; // 전역 배지 동기화
     } catch (e) {
       setState(() {
         _error = e.toString();

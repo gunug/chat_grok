@@ -9,6 +9,7 @@ import 'storage.dart';
 import 'chat_service.dart';
 import 'settings_screen.dart';
 import 'credits_screen.dart';
+import 'credits.dart';
 import 'login_screen.dart';
 import 'supa.dart';
 
@@ -100,10 +101,14 @@ class _ChatScreenState extends State<ChatScreen> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
   bool _streaming = false;
-  int _sessionTokens = 0;
-  double _sessionCost = 0;
 
   Conversation? get _conv => store.active;
+
+  @override
+  void initState() {
+    super.initState();
+    refreshCredit(); // 로그인 후 잔액 로드
+  }
 
   @override
   void dispose() {
@@ -191,8 +196,9 @@ class _ChatScreenState extends State<ChatScreen> {
         final cost = (usage['costUsd'] as num?)?.toDouble() ?? 0;
         conv.usageTokens += total;
         conv.usageCost += cost;
-        _sessionTokens += total;
-        _sessionCost += cost;
+        // 함수가 실어 보낸 남은 잔액으로 전역 크레딧 즉시 갱신.
+        final bal = usage['balanceMicros'];
+        if (bal is num) setBalanceMicros(bal);
       }
     }
     conv.updatedAt = DateTime.now().millisecondsSinceEpoch;
@@ -267,17 +273,7 @@ class _ChatScreenState extends State<ChatScreen> {
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(fontSize: 17)),
         actions: [
-          if (_sessionTokens > 0)
-            Center(
-              child: Padding(
-                padding: const EdgeInsets.only(right: 6),
-                child: Text(
-                  '∑ $_sessionTokens tok'
-                  '${_sessionCost > 0 ? ' · \$${_sessionCost.toStringAsFixed(4)}' : ''}',
-                  style: const TextStyle(fontSize: 11, color: _textDim),
-                ),
-              ),
-            ),
+          const CreditBadge(),
           PopupMenuButton<String>(
             onSelected: (v) {
               if (v == 'md') _export(false);
