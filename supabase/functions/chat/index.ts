@@ -10,8 +10,8 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const SERVICE_KEY = "chat_grok";
-const TRIAL_MICROS = 100_000; // $0.10 첫 사용 체험 크레딧
-const MIN_BALANCE_MICROS = 20_000; // 호출 전 최소 잔액 버퍼
+const TRIAL_CREDITS = 300; // 첫 사용 체험 크레딧 (1 credit = 1원 by config)
+const MIN_BALANCE_CREDITS = 1; // 호출 전 최소 잔액(크레딧)
 
 const XAI_BASE_URL = Deno.env.get("XAI_BASE_URL") ?? "https://api.x.ai/v1";
 const XAI_MODEL = Deno.env.get("XAI_MODEL") ?? "grok-3";
@@ -73,17 +73,17 @@ Deno.serve(async (req: Request) => {
   await admin.rpc("app_register_service", {
     p_user: user.id,
     p_service: SERVICE_KEY,
-    p_trial_micros: TRIAL_MICROS,
+    p_trial_credits: TRIAL_CREDITS,
   });
   const { data: credit } = await admin
     .from("app_service_credits")
-    .select("balance_micros")
+    .select("balance_credits")
     .eq("user_id", user.id)
     .eq("service_key", SERVICE_KEY)
     .maybeSingle();
-  const balance = (credit?.balance_micros as number | undefined) ?? 0;
-  if (balance < MIN_BALANCE_MICROS) {
-    return json({ error: "insufficient_credit", balanceMicros: balance }, 402);
+  const balance = (credit?.balance_credits as number | undefined) ?? 0;
+  if (balance < MIN_BALANCE_CREDITS) {
+    return json({ error: "insufficient_credit", balanceCredits: balance }, 402);
   }
 
   // Prepend the system prompt unless the client already sent one.
@@ -144,27 +144,7 @@ Deno.serve(async (req: Request) => {
             if (data === "[DONE]") continue;
             try {
               const chunk = JSON.parse(data);
-              if (chunk.usage) {
-                const u = chunk.usage;
-                capturedUsage = u;
-                // xAI returns its own cost; 1 USD = 1e10 ticks.
-                const costUsd = u.cost_in_usd_ticks != null
-                  ? u.cost_in_usd_ticks / 1e10
-                  : 0;
-                const costMicros = Math.ceil(costUsd * 1e6);
-                send(
-                  `event: usage\ndata: ${JSON.stringify({
-                    prompt: u.prompt_tokens,
-                    completion: u.completion_tokens,
-                    total: u.total_tokens,
-                    cached: u.prompt_tokens_details?.cached_tokens ?? 0,
-                    reasoning: u.completion_tokens_details?.reasoning_tokens ?? 0,
-                    costUsd: costUsd || null,
-                    // 차감 후 예상 잔액(낙관적; 권위값은 app_service_credits).
-                    balanceMicros: balance - costMicros,
-                  })}\n\n`,
-                );
-              }
+              if (chunk.usage) capturedUsage = chunk.usage;
               const delta = chunk.choices?.[0]?.delta?.content;
               if (delta) send(`data: ${JSON.stringify({ delta })}\n\n`);
             } catch {
@@ -173,14 +153,16 @@ Deno.serve(async (req: Request) => {
           }
         }
 
-        // 실제 원가를 크레딧에서 차감(스트림 종료 전에 보장).
+        // 사용 기록: xAI 실제 원가(micro-USD)를 넘기면 RPC가 배율을 적용해 크레딧을
+        // 차감하고 새 잔액(크레딧)을 돌려준다. 그 뒤 usage 이벤트로 함께 보낸다.
         if (capturedUsage) {
           const u = capturedUsage;
           const costUsd = u.cost_in_usd_ticks != null
             ? u.cost_in_usd_ticks / 1e10
             : 0;
+          let balanceCredits = balance;
           try {
-            await admin.rpc("app_record_usage", {
+            const { data: nb } = await admin.rpc("app_record_usage", {
               p_user: user.id,
               p_service: SERVICE_KEY,
               p_provider: "xai",
@@ -190,9 +172,22 @@ Deno.serve(async (req: Request) => {
               p_completion_tokens: u.completion_tokens ?? 0,
               p_cost_micros: Math.ceil(costUsd * 1e6),
             });
+            if (nb != null) balanceCredits = nb as number;
           } catch (e) {
             console.error("app_record_usage failed:", e);
           }
+          send(
+            `event: usage\ndata: ${JSON.stringify({
+              prompt: u.prompt_tokens,
+              completion: u.completion_tokens,
+              total: u.total_tokens,
+              cached: u.prompt_tokens_details?.cached_tokens ?? 0,
+              reasoning: u.completion_tokens_details?.reasoning_tokens ?? 0,
+              costUsd: costUsd || null,
+              creditsCharged: balance - balanceCredits,
+              balanceCredits,
+            })}\n\n`,
+          );
         }
 
         send(`event: done\ndata: {}\n\n`);

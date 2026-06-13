@@ -196,9 +196,9 @@ class _ChatScreenState extends State<ChatScreen> {
         final cost = (usage['costUsd'] as num?)?.toDouble() ?? 0;
         conv.usageTokens += total;
         conv.usageCost += cost;
-        // 함수가 실어 보낸 남은 잔액으로 전역 크레딧 즉시 갱신.
-        final bal = usage['balanceMicros'];
-        if (bal is num) setBalanceMicros(bal);
+        // 함수가 실어 보낸 남은 잔액(크레딧)으로 전역 크레딧 즉시 갱신.
+        final bal = usage['balanceCredits'];
+        if (bal is num) setBalanceCredits(bal.toInt());
       }
     }
     conv.updatedAt = DateTime.now().millisecondsSinceEpoch;
@@ -511,8 +511,8 @@ class _Bubble extends StatelessWidget {
       '출력 ${u['completion']}${(u['reasoning'] ?? 0) > 0 ? ' (추론 ${u['reasoning']})' : ''}',
       '합계 ${u['total']} tok',
     ];
-    if (u['costUsd'] != null) {
-      parts.add('💵 \$${(u['costUsd'] as num).toStringAsFixed(6)}');
+    if (u['creditsCharged'] != null) {
+      parts.add('💳 ${u['creditsCharged']} 크레딧');
     }
     return Padding(
       padding: const EdgeInsets.only(top: 8),
