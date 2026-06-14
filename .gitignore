@@ -1,5 +1,10 @@
 # --- Secrets (xAI key lives here locally; goes to Supabase secrets, never git) ---
 .env
+# Play release secrets — keystore, signing creds, service-account JSON.
+android/key.properties
+*.jks
+*.keystore
+keys/
 
 # --- Flutter / Dart ---
 .dart_tool/
