@@ -2,7 +2,7 @@
     <!-- Network access for calling the Supabase Edge Function. -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <application
-        android:label="Grok Chat"
+        android:label="simple chat bot"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

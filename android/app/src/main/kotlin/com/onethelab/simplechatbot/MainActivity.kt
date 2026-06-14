@@ -1,4 +1,4 @@
-package com.onethelab.chat_grok
+package com.onethelab.simplechatbot
 
 import io.flutter.embedding.android.FlutterActivity
 

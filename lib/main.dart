@@ -40,7 +40,7 @@ class GrokApp extends StatelessWidget {
   Widget build(BuildContext context) {
     final base = ThemeData.dark(useMaterial3: true);
     return MaterialApp(
-      title: 'Grok Chat',
+      title: 'simple chat bot',
       debugShowCheckedModeBanner: false,
       theme: base.copyWith(
         scaffoldBackgroundColor: _bg,
@@ -269,7 +269,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final messages = conv?.messages ?? const <Message>[];
     return Scaffold(
       appBar: AppBar(
-        title: Text(conv?.title ?? 'Grok Chat',
+        title: Text(conv?.title ?? 'simple chat bot',
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(fontSize: 17)),
         actions: [

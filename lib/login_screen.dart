@@ -46,7 +46,7 @@ class _LoginScreenState extends State<LoginScreen> {
               const Text('✦',
                   style: TextStyle(fontSize: 48, color: Color(0xFF6C8CFF))),
               const SizedBox(height: 12),
-              const Text('Grok Chat',
+              const Text('simple chat bot',
                   style:
                       TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
