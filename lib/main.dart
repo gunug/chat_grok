@@ -11,19 +11,32 @@ import 'settings_screen.dart';
 import 'credits_screen.dart';
 import 'credits.dart';
 import 'login_screen.dart';
+import 'debug_log.dart';
 import 'supa.dart';
 
 final store = Store();
 
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await store.init();
-  try {
-    await initSupabase(store.supabaseUrl, store.anonKey);
-  } catch (_) {
-    // 네트워크 문제 시에도 앱은 뜬다(로그인 화면에서 재시도).
-  }
-  runApp(const GrokApp());
+  runZonedGuarded(() async {
+    WidgetsFlutterBinding.ensureInitialized();
+    // 모든 Flutter/비동기 예외를 인앱 로그로 잡는다.
+    FlutterError.onError = (details) {
+      logD('FlutterError: ${details.exceptionAsString()}');
+      FlutterError.presentError(details);
+    };
+    logD('app start');
+    await store.init();
+    try {
+      await initSupabase(store.supabaseUrl, store.anonKey);
+      logD('supabase init ok');
+    } catch (e) {
+      logD('supabase init FAIL: $e');
+    }
+    runApp(const GrokApp());
+  }, (e, st) {
+    logD('Uncaught: $e');
+    logD('$st');
+  });
 }
 
 const _bg = Color(0xFF0D0F14);
@@ -74,7 +87,10 @@ class _AuthGateState extends State<AuthGate> {
     if (u != null && u.isAnonymous) {
       Supabase.instance.client.auth.signOut();
     }
-    _sub = Supabase.instance.client.auth.onAuthStateChange.listen((_) {
+    _sub = Supabase.instance.client.auth.onAuthStateChange.listen((data) {
+      final u = data.session?.user;
+      logD('authState: ${data.event} user=${u?.id ?? "null"} '
+          'anon=${u?.isAnonymous ?? "-"} email=${u?.email ?? "-"}');
       if (mounted) setState(() {});
     });
   }
@@ -87,7 +103,9 @@ class _AuthGateState extends State<AuthGate> {
 
   @override
   Widget build(BuildContext context) {
-    return isLoggedIn ? const ChatScreen() : const LoginScreen();
+    final logged = isLoggedIn;
+    logD('AuthGate build: loggedIn=$logged');
+    return logged ? const ChatScreen() : const LoginScreen();
   }
 }
 
@@ -227,6 +245,11 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  void _openLogs() => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const DebugLogScreen()),
+      );
+
   Future<void> _logout() async {
     await signOut(); // AuthGate가 로그인 화면으로 전환.
   }
@@ -280,6 +303,7 @@ class _ChatScreenState extends State<ChatScreen> {
               if (v == 'json') _export(true);
               if (v == 'credits') _openCredits();
               if (v == 'settings') _openSettings();
+              if (v == 'logs') _openLogs();
               if (v == 'logout') _logout();
             },
             itemBuilder: (_) => const [
@@ -287,6 +311,7 @@ class _ChatScreenState extends State<ChatScreen> {
               PopupMenuItem(value: 'json', child: Text('JSON 내보내기')),
               PopupMenuItem(value: 'credits', child: Text('크레딧')),
               PopupMenuItem(value: 'settings', child: Text('설정')),
+              PopupMenuItem(value: 'logs', child: Text('로그')),
               PopupMenuItem(value: 'logout', child: Text('로그아웃')),
             ],
           ),

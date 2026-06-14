@@ -6,6 +6,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'config.dart';
+import 'debug_log.dart';
 
 bool _inited = false;
 bool get supabaseInited => _inited;
@@ -42,16 +43,24 @@ String? currentAccessToken() =>
 /// Native Google sign-in -> exchange the ID token for a Supabase session.
 /// Throws GoogleSignInException (e.g. code == canceled) if the user backs out.
 Future<void> signInWithGoogle() async {
+  logD('signInWithGoogle: start');
   await _ensureGoogleInit();
+  logD('google init done; supportsAuthenticate='
+      '${GoogleSignIn.instance.supportsAuthenticate()}');
   final account = await GoogleSignIn.instance.authenticate();
+  logD('google account: ${account.email}');
   final idToken = account.authentication.idToken;
+  logD('idToken: ${idToken == null ? "NULL" : "len ${idToken.length}"}');
   if (idToken == null) {
     throw 'Google ID 토큰을 받지 못했습니다.';
   }
-  await Supabase.instance.client.auth.signInWithIdToken(
+  logD('supabase.signInWithIdToken ...');
+  final res = await Supabase.instance.client.auth.signInWithIdToken(
     provider: OAuthProvider.google,
     idToken: idToken,
   );
+  logD('signInWithIdToken ok: user=${res.user?.id} email=${res.user?.email} '
+      'anon=${res.user?.isAnonymous}');
 }
 
 /// Sign out of both Google and Supabase.

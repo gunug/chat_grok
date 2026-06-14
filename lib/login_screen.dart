@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
 import 'supa.dart';
+import 'debug_log.dart';
 
 // Shown when there is no (non-anonymous) session. Google login is required so
 // credits attach to the account.
@@ -20,10 +21,13 @@ class _LoginScreenState extends State<LoginScreen> {
       await signInWithGoogle();
       // 성공하면 AuthGate가 onAuthStateChange로 ChatScreen으로 전환.
     } on GoogleSignInException catch (e) {
+      logD('GoogleSignInException: code=${e.code.name} desc=${e.description}');
       if (e.code != GoogleSignInExceptionCode.canceled && mounted) {
         _snack('로그인 실패: ${e.code.name}');
       }
-    } catch (e) {
+    } catch (e, st) {
+      logD('login error: $e');
+      logD('$st');
       if (mounted) _snack('로그인 실패: $e');
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -74,6 +78,17 @@ class _LoginScreenState extends State<LoginScreen> {
               const SizedBox(height: 16),
               const Text('크레딧은 로그인한 계정에 귀속됩니다.',
                   style: TextStyle(fontSize: 12, color: Color(0xFF5A6373))),
+              const SizedBox(height: 24),
+              TextButton.icon(
+                onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const DebugLogScreen()),
+                ),
+                icon: const Icon(Icons.bug_report_outlined, size: 18),
+                label: const Text('로그 보기'),
+                style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFF9AA3B2)),
+              ),
             ],
           ),
         ),
