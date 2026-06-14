@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'credits.dart';
+import 'purchase_service.dart';
 
 // Shows this app's credit balance for the signed-in user.
 // Reads app_service_credits directly — RLS returns only the user's own row.
@@ -15,11 +16,42 @@ class _CreditsScreenState extends State<CreditsScreen> {
   String? _error;
   int _balance = 0, _spent = 0, _purchased = 0;
   int? _balanceKrw;
+  String? _price;
+
+  PurchaseService get _ps => PurchaseService.instance;
 
   @override
   void initState() {
     super.initState();
     _load();
+    _ps.successTick.addListener(_onTopUpSuccess);
+    _ps.lastError.addListener(_onPurchaseError);
+    _ps.loadProduct().then((p) {
+      if (mounted) setState(() => _price = p?.price);
+    });
+  }
+
+  @override
+  void dispose() {
+    _ps.successTick.removeListener(_onTopUpSuccess);
+    _ps.lastError.removeListener(_onPurchaseError);
+    super.dispose();
+  }
+
+  void _onTopUpSuccess() {
+    if (!mounted) return;
+    _load();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('충전 완료 — 크레딧이 적립되었습니다.')),
+    );
+  }
+
+  void _onPurchaseError() {
+    final msg = _ps.lastError.value;
+    if (!mounted || msg == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), backgroundColor: Colors.red[900]),
+    );
   }
 
   Future<void> _load() async {
@@ -86,9 +118,34 @@ class _CreditsScreenState extends State<CreditsScreen> {
                     const SizedBox(height: 12),
                     _card('충전', _purchased),
                     const SizedBox(height: 24),
+                    ValueListenableBuilder<bool>(
+                      valueListenable: _ps.busy,
+                      builder: (_, busy, _) => SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: busy ? null : () => _ps.buy(),
+                          icon: busy
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2, color: Colors.white))
+                              : const Icon(Icons.add_card),
+                          label: Text(busy
+                              ? '진행 중…'
+                              : '크레딧 충전하기${_price != null ? ' ($_price)' : ''}'),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFF6C8CFF),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
                     const Text(
                       '첫 사용 시 체험 크레딧이 지급됩니다. 메시지 1건당 실제 사용량에 따라 '
-                      '크레딧이 차감됩니다. 결제(충전)는 추후 추가됩니다.',
+                      '크레딧이 차감됩니다. 충전은 Google Play 인앱결제(credit_5000: 5,000원 → '
+                      '5,000 크레딧)로 처리되며, 서버에서 결제를 검증한 뒤 적립됩니다.',
                       style: TextStyle(fontSize: 12, color: Colors.white60),
                     ),
                   ],

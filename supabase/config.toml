@@ -353,6 +353,9 @@ allow_dynamic_registration = false
 # isn't publicly callable by anyone who guesses the URL.
 verify_jwt = true
 
+[functions.purchase-verify]
+verify_jwt = true
+
 [edge_runtime]
 enabled = true
 # Supported request policies: `oneshot`, `per_worker`.

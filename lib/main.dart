@@ -12,6 +12,7 @@ import 'credits_screen.dart';
 import 'credits.dart';
 import 'login_screen.dart';
 import 'debug_log.dart';
+import 'purchase_service.dart';
 import 'supa.dart';
 
 final store = Store();
@@ -32,6 +33,7 @@ Future<void> main() async {
     } catch (e) {
       logD('supabase init FAIL: $e');
     }
+    PurchaseService.instance.init(); // 결제 스트림 구독(보류/복원 처리)
     runApp(const GrokApp());
   }, (e, st) {
     logD('Uncaught: $e');
