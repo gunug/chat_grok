@@ -1,94 +1,76 @@
-# Chat Grok (Android · Flutter)
+# simple chat bot (repo: chat_grok)
 
-xAI **Grok** 챗봇 안드로이드 앱입니다. xAI API 키는 앱에 들어가지 않고,
-**Supabase Edge Function**이 대신 호출합니다.
-
-```
-Flutter 앱(Android)  ──►  Supabase Edge Function "chat"  ──►  xAI API
-        │                    (XAI_API_KEY 시크릿 보관)
-        └ 앱에는 Supabase URL + anon key만 저장(공개돼도 안전)
-```
-
-- 키는 기기/소스/GitHub 어디에도 노출되지 않음 (Supabase 시크릿에만 존재)
-- 스트리밍 응답, 여러 대화 저장, 자동 제목, 삭제, **토큰·USD 비용 표시**, 내보내기(공유)
-
-## 구조
+Flutter **Android** app — an xAI **Grok** chatbot with Google login, a shared
+credit platform, and Google Play in-app purchase top-up. The xAI key never ships
+in the app; a Supabase Edge Function proxies xAI and streams responses.
 
 ```
-chat_grok/
-├─ lib/
-│  ├─ main.dart            앱·채팅 화면(드로어/말풍선/입력)
-│  ├─ models.dart          Conversation / Message / usage 모델
-│  ├─ storage.dart         shared_preferences 저장(대화 + 설정)
-│  ├─ chat_service.dart    Supabase 함수로 SSE 스트리밍 호출
-│  └─ settings_screen.dart Supabase URL / anon key 입력
-├─ supabase/
-│  ├─ config.toml          functions.chat 설정
-│  └─ functions/chat/index.ts   xAI 프록시 + 스트리밍(Deno/TS)
-└─ android/                안드로이드 설정(INTERNET 권한, 앱 이름)
+Flutter app ──Google JWT──► Supabase Edge Functions ──► xAI Grok / Google Play
+   chat:            stream chat + credit gate/deduct
+   purchase-verify: verify IAP → grant credits (app_top_up)
 ```
 
----
+- **Android package**: `com.onethelab.simplechatbot` · **app name**: "simple chat bot"
+- **Backend**: Supabase project `oerrgsanrnelhvgikgkv` (shared credit platform with
+  android-planlet; credits split by `service_key = chat_grok`)
+- The app embeds only **public** values (Supabase URL/anon key, Google Web client ID)
+  in `lib/config.dart`. Secrets stay server-side (Supabase secrets / dashboard).
 
-## 1) Supabase 백엔드 배포 (최초 1회)
+## Features
+- Streaming Grok chat (SSE), multiple conversations, auto titles, delete, export
+  (share Markdown/JSON) — stored on-device (`shared_preferences`).
+- **Google login** (credits attach to the account).
+- **Credits**: integer-credit model with markup at consumption. Shown on every
+  screen (💳 badge) and a Credits page (balance / used / charged + ₩ estimate).
+- **In-app purchase** top-up: `credit_5000` (5,000원 → 5,000 credits), server-verified.
+- In-app **debug log** (view + copy) for diagnosing release/Play builds.
 
-> xAI 키 발급: https://console.x.ai · Supabase 가입: https://supabase.com
+## Project layout
+```
+lib/
+  main.dart            app + AuthGate (login gate) + chat screen
+  supa.dart            Supabase init + Google sign-in/out
+  login_screen.dart    Google login screen
+  chat_service.dart    SSE streaming from the chat function
+  models.dart storage.dart   conversations (shared_preferences)
+  credits.dart         global credit balance + CreditBadge (all screens)
+  credits_screen.dart  balance + "크레딧 충전하기" (IAP)
+  purchase_service.dart in_app_purchase flow (server-verified)
+  config.dart          public Supabase + Google Web client ID
+  settings_screen.dart optional Supabase override
+  debug_log.dart       in-app log (logD + DebugLogScreen)
+supabase/functions/
+  chat/                xAI proxy + credit gate/deduct (SSE)
+  purchase-verify/     verify Play purchase → app_top_up
+```
 
+## Backend deploy (functions only — never `supabase config push` on this shared project)
 ```powershell
-# 0. CLI 로그인 (브라우저 인증)
-supabase login
-
-# 1. 프로젝트 연결 (대시보드 URL의 project ref)
-supabase link --project-ref <YOUR_PROJECT_REF>
-
-# 2. xAI 키를 시크릿으로 등록 (앱에는 안 들어감)
-supabase secrets set XAI_API_KEY=xai-xxxxxxxx
-#   선택: 모델 변경
-#   supabase secrets set XAI_MODEL=grok-3
-
-# 3. 함수 배포
 supabase functions deploy chat
+supabase functions deploy purchase-verify
+# Secrets (already set on the shared project): XAI_API_KEY, GOOGLE_PLAY_SA_B64
 ```
 
-배포 후 함수 주소는 `https://<project-ref>.supabase.co/functions/v1/chat` 입니다.
-
-## 2) 앱 빌드 & 설치
-
+## Build & release to Play internal testing
+Signing uses an upload keystore via `android/key.properties` (gitignored).
 ```powershell
-flutter pub get
-
-# 연결된 기기/에뮬레이터에서 실행
-flutter run
-
-# 또는 설치용 APK 빌드
-flutter build apk --release
-#  → build\app\outputs\flutter-apk\app-release.apk
-#  기기에 설치:
-flutter install        # USB 연결 시
-#  또는 위 .apk 파일을 폰으로 전송해서 설치
+# bump pubspec `version: x.y.z+N` (Play rejects a duplicate versionCode)
+flutter analyze
+flutter build appbundle --release
+python <android-planlet>/tools/play_upload.py \
+  --key <SA json> --aab build/app/outputs/bundle/release/app-release.aab \
+  --package com.onethelab.simplechatbot --track internal --status completed --notes "..."
 ```
+Full runbook: `android-planlet/docs/play-release.md`. Architecture + platform
+schema: `android-planlet/docs/platform-architecture.md`.
 
-## 3) 앱에서 연결 설정 (최초 1회)
+## Notes for testers / setup
+- Install via the **Play internal-testing opt-in link** with a license-tester
+  Google account — IAP does **not** work on sideloaded builds.
+- For Google login on a Play build, the **Play App Signing SHA-1** must be added to
+  the Google OAuth Android client (`com.onethelab.simplechatbot`).
+- A newly created in-app product can take **24–48h** to become available to the
+  Billing API (`product not found` until then).
 
-앱 실행 → 우상단 ⋮ → **설정**에서 입력:
-- **Project URL**: `https://<project-ref>.supabase.co`
-- **anon public key**: Supabase 대시보드 → Project Settings → API → `anon public`
-
-저장하면 바로 채팅할 수 있습니다.
-
----
-
-## 환경변수(Supabase 시크릿)
-
-| 시크릿          | 기본값                | 설명             |
-| --------------- | --------------------- | ---------------- |
-| `XAI_API_KEY`   | (필수)                | xAI API 키       |
-| `XAI_MODEL`     | `grok-3`              | 사용할 모델      |
-| `XAI_BASE_URL`  | `https://api.x.ai/v1` | API 엔드포인트   |
-| `SYSTEM_PROMPT` | (기본 프롬프트)       | 시스템 프롬프트  |
-
-## 참고
-
-- 대화 기록은 **기기 내부(shared_preferences)** 에 저장됩니다. 앱 삭제 시 사라집니다.
-- 비용(`cost_in_usd_ticks`)은 xAI가 직접 계산한 값(1 USD = 1e10 ticks)으로, grok-4.3 가격으로 검증됨.
-- 웹(Node) 버전은 git 이력에서 확인할 수 있습니다.
+See [CLAUDE.md](CLAUDE.md) for the full developer brief (identifiers, secrets,
+SHA-1s, gotchas).
