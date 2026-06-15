@@ -40,15 +40,20 @@ class ChatService {
     required String anonKey,
     required List<Map<String, dynamic>> messages,
     String? accessToken,
+    String? requestId,
   }) async* {
     final uri = Uri.parse('$supabaseUrl/functions/v1/chat');
     final client = http.Client();
+    var completed = false; // usage/done까지 받았으면 답변은 사실상 완성됨
     try {
       final req = http.Request('POST', uri);
       req.headers['Content-Type'] = 'application/json';
       req.headers['Authorization'] = 'Bearer ${accessToken ?? anonKey}';
       req.headers['apikey'] = anonKey;
-      req.body = jsonEncode({'messages': messages});
+      req.body = jsonEncode({
+        'messages': messages,
+        'requestId': ?requestId,
+      });
 
       final resp = await client.send(req);
 
@@ -78,11 +83,17 @@ class ChatService {
         buffer = events.removeLast();
         for (final evt in events) {
           final parsed = _parseEvent(evt);
-          if (parsed != null) yield parsed;
+          if (parsed == null) continue;
+          if (parsed.type == 'usage' || parsed.type == 'done') {
+            completed = true;
+          }
+          yield parsed;
         }
       }
     } catch (e) {
-      yield ChatEvent.error(e.toString());
+      // 앱이 백그라운드로 가면 소켓이 끊겨 "Connection closed" 예외가 난다.
+      // 답변을 이미 다 받은 뒤(완료)라면 가짜 실패이므로 무시한다.
+      if (!completed) yield ChatEvent.error(e.toString());
     } finally {
       client.close();
     }

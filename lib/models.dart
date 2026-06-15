@@ -5,13 +5,23 @@ class Message {
   final String role; // 'user' | 'assistant'
   String content;
   Map<String, dynamic>? usage; // 봇 답변의 토큰/비용(있을 때만)
+  String? imagePath; // 생성된 이미지의 기기 내 파일 경로(있을 때만)
+  // 서버-완료-저장용. assistant 메시지에서:
+  //  status 'pending' = 서버 결과 대기(백그라운드 복귀 시 조회), 'error' = 실패(재전송),
+  //  null/'done' = 완료. requestId = cg_pending_chat 행 키.
+  String? requestId;
+  String? status;
 
-  Message(this.role, this.content, {this.usage});
+  Message(this.role, this.content,
+      {this.usage, this.imagePath, this.requestId, this.status});
 
   Map<String, dynamic> toJson() => {
         'role': role,
         'content': content,
         if (usage != null) 'usage': usage,
+        if (imagePath != null) 'imagePath': imagePath,
+        if (requestId != null) 'requestId': requestId,
+        if (status != null) 'status': status,
       };
 
   factory Message.fromJson(Map<String, dynamic> j) => Message(
@@ -20,6 +30,9 @@ class Message {
         usage: j['usage'] != null
             ? Map<String, dynamic>.from(j['usage'] as Map)
             : null,
+        imagePath: j['imagePath'] as String?,
+        requestId: j['requestId'] as String?,
+        status: j['status'] as String?,
       );
 }
 
