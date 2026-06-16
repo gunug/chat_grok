@@ -8,6 +8,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'models.dart';
 import 'storage.dart';
 import 'chat_service.dart';
+import 'models_catalog.dart';
 import 'pending_chat.dart';
 import 'image_service.dart';
 import 'image_store.dart';
@@ -45,6 +46,10 @@ Future<void> main() async {
     logD('$st');
   });
 }
+
+// 이미지 생성 버튼 노출 여부. 기능 코드(image_service/gallery 등)는 유지하고
+// 진입 버튼만 숨긴다 — 나중에 true로 되돌리면 즉시 복구.
+const bool _showImageButton = false;
 
 const _bg = Color(0xFF0D0F14);
 const _panel = Color(0xFF161922);
@@ -127,6 +132,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final _scroll = ScrollController();
   bool _streaming = false;
   bool _generatingImage = false;
+  bool _atBottom = true; // "맨 아래로" 버튼 표시용
+  // 전송한 질문을 화면 상단에 고정하기 위한 앵커(생성 중 화면은 움직이지 않음).
+  Message? _anchorMsg;
+  final _anchorKey = GlobalKey();
+  List<ChatModel> _models = const []; // cg_models에서 로드한 선택 가능한 모델
 
   Conversation? get _conv => store.active;
 
@@ -134,17 +144,84 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _scroll.addListener(_onScroll);
     refreshCredit(); // 로그인 후 잔액 로드
+    fetchModels().then((m) {
+      if (mounted && m.isNotEmpty) setState(() => _models = m);
+    });
     // 백그라운드에서 서버가 완료해 둔 답변이 있으면 이어받는다.
     WidgetsBinding.instance.addPostFrameCallback((_) => _reconcileAllPending());
+  }
+
+  String get _modelLabel {
+    final id = store.model;
+    for (final m in _models) {
+      if (m.id == id) return m.label;
+    }
+    return id;
+  }
+
+  // 모델 선택 시트(provider별 그룹).
+  Future<void> _pickModel() async {
+    final models = _models.isNotEmpty
+        ? _models
+        : [ChatModel(id: store.model, provider: '', label: store.model)];
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: _panel,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) {
+        return SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 8, 16, 8),
+                child: Text('모델 선택',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+              for (final m in models)
+                ListTile(
+                  onTap: () async {
+                    final nav = Navigator.of(context);
+                    await store.setModel(m.id);
+                    nav.pop();
+                    if (mounted) setState(() {});
+                  },
+                  title: Text(m.label),
+                  subtitle: m.provider.isNotEmpty
+                      ? Text(
+                          m.provider == 'openai' ? 'OpenAI' : 'xAI (Grok)',
+                          style: const TextStyle(fontSize: 11, color: _textDim))
+                      : null,
+                  trailing: m.id == store.model
+                      ? const Icon(Icons.check, color: _accent)
+                      : null,
+                ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _scroll.removeListener(_onScroll);
     _input.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final atBottom =
+        (_scroll.position.maxScrollExtent - _scroll.position.pixels) <= 80;
+    if (atBottom != _atBottom) setState(() => _atBottom = atBottom);
   }
 
   @override
@@ -157,8 +234,29 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) {
         _scroll.animateTo(_scroll.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 150), curve: Curves.easeOut);
+            duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
       }
+    });
+  }
+
+  // 방금 보낸 질문을 화면 상단으로 올린다. 이후 답변은 그 아래로 채워지며
+  // 화면은 더 움직이지 않으므로, 사용자가 답변을 처음부터 읽을 수 있다.
+  void _anchorQuestionToTop() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _anchorKey.currentContext;
+      if (ctx == null) {
+        // 앵커가 아직 안 그려졌으면 최소한 바닥으로(질문이 보이도록).
+        if (_scroll.hasClients) {
+          _scroll.jumpTo(_scroll.position.maxScrollExtent);
+        }
+        return;
+      }
+      Scrollable.ensureVisible(
+        ctx,
+        alignment: 0.0, // 뷰포트 상단
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOut,
+      );
     });
   }
 
@@ -214,10 +312,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final requestId = newRequestId();
     final bot =
         Message('assistant', '', requestId: requestId, status: 'pending');
+    // 답변 대상 질문(가장 최근 user 메시지)을 상단 고정 앵커로.
+    final lastUserIdx = conv.messages.lastIndexWhere((m) => m.role == 'user');
+    _anchorMsg = lastUserIdx >= 0 ? conv.messages[lastUserIdx] : null;
     conv.messages.add(bot);
     setState(() => _streaming = true);
     await store.save();
-    _scrollToBottom();
+    // 질문을 화면 상단으로. 이후 생성 중에는 화면을 움직이지 않는다.
+    _anchorQuestionToTop();
 
     Map<String, dynamic>? usage;
     String? serverError;
@@ -228,11 +330,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         accessToken: token,
         messages: history,
         requestId: requestId,
+        model: store.model,
       )) {
         switch (e.type) {
           case 'delta':
+            // 생성 중에는 따라 내려가지 않는다(사용자가 읽는 위치 유지).
             setState(() => bot.content += e.delta!);
-            _scrollToBottom();
             break;
           case 'usage':
             usage = e.usage;
@@ -256,6 +359,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       final cost = (usage['costUsd'] as num?)?.toDouble() ?? 0;
       conv.usageTokens += total;
       conv.usageCost += cost;
+      final charged = (usage['creditsCharged'] as num?)?.toInt() ?? 0;
+      conv.usageCredits += charged;
       final bal = usage['balanceCredits'];
       if (bal is num) setBalanceCredits(bal.toInt());
       PendingChat.delete(requestId); // 서버 행 정리(best-effort)
@@ -275,7 +380,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     conv.updatedAt = DateTime.now().millisecondsSinceEpoch;
     await store.save();
     if (mounted) setState(() => _streaming = false);
-    _scrollToBottom();
+    // 완료 시에도 화면은 움직이지 않는다(질문 상단 고정 유지).
 
     if (bot.status == 'pending') await _reconcileOne(conv, bot);
   }
@@ -323,12 +428,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           final cost = (usage['costUsd'] as num?)?.toDouble() ?? 0;
           conv.usageTokens += total;
           conv.usageCost += cost;
+          final charged = (usage['creditsCharged'] as num?)?.toInt() ?? 0;
+          conv.usageCredits += charged;
           final bal = usage['balanceCredits'];
           if (bal is num) setBalanceCredits(bal.toInt());
         }
         await store.save();
         PendingChat.delete(id);
-        _scrollToBottom();
+        // 백그라운드 복귀로 채워진 답변이므로 화면을 끌어내리지 않는다.
         return;
       }
       if (st == 'error') {
@@ -382,10 +489,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
       return;
     }
-    // 프롬프트 생성에도 비용이 들었으므로 차감된 잔액을 즉시 반영.
+    // 프롬프트 생성에도 비용이 들었으므로 차감된 잔액을 즉시 반영 + 대화 누적.
     if (composed.balanceCredits != null) {
       setBalanceCredits(composed.balanceCredits!);
     }
+    conv.usageCredits += composed.creditsCharged ?? 0;
 
     // 확인창: 전송 프롬프트 + 한글 번역 + 차단 시에도 과금됨 안내.
     final go = mounted ? await _confirmImageDialog(composed) : false;
@@ -410,6 +518,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (result.balanceCredits != null) {
         setBalanceCredits(result.balanceCredits!);
       }
+      conv.usageCredits += result.creditsCharged ?? 0;
       if (result.blocked || result.bytes == null) {
         conv.messages.remove(bot);
         if (mounted) {
@@ -618,6 +727,29 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             ],
           ),
         ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(38),
+          child: InkWell(
+            onTap: _pickModel,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.tune, size: 15, color: _textDim),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Text('모델: $_modelLabel',
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 12.5, color: _textDim)),
+                  ),
+                  const Icon(Icons.arrow_drop_down, size: 18, color: _textDim),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
       drawer: _buildDrawer(),
       body: Column(
@@ -625,16 +757,35 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           Expanded(
             child: messages.isEmpty
                 ? const _EmptyState()
-                : ListView.builder(
-                    controller: _scroll,
-                    padding: const EdgeInsets.all(16),
-                    itemCount: messages.length,
-                    itemBuilder: (_, i) => _Bubble(
-                      message: messages[i],
-                      onResend: messages[i].status == 'error'
-                          ? () => _resend(messages[i])
-                          : null,
-                    ),
+                : Stack(
+                    children: [
+                      ListView.builder(
+                        controller: _scroll,
+                        padding: const EdgeInsets.all(16),
+                        itemCount: messages.length,
+                        itemBuilder: (_, i) => _Bubble(
+                          key: messages[i] == _anchorMsg ? _anchorKey : null,
+                          message: messages[i],
+                          onResend: messages[i].status == 'error'
+                              ? () => _resend(messages[i])
+                              : null,
+                        ),
+                      ),
+                      if (!_atBottom)
+                        Positioned(
+                          right: 12,
+                          bottom: 12,
+                          child: _ScrollToBottomButton(onTap: () {
+                            if (_scroll.hasClients) {
+                              _scroll.animateTo(
+                                _scroll.position.maxScrollExtent,
+                                duration: const Duration(milliseconds: 250),
+                                curve: Curves.easeOut,
+                              );
+                            }
+                          }),
+                        ),
+                    ],
                   ),
           ),
           _buildComposer(),
@@ -675,9 +826,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     selectedTileColor: _panel,
                     title: Text(c.title,
                         maxLines: 1, overflow: TextOverflow.ellipsis),
-                    subtitle: c.usageTokens > 0
+                    subtitle: (c.usageTokens > 0 || c.usageCredits > 0)
                         ? Text(
-                            '${c.usageTokens} tok · \$${c.usageCost.toStringAsFixed(4)}',
+                            '${c.usageTokens} tok · 💳 ${formatCredits(c.usageCredits)} 크레딧',
                             style: const TextStyle(
                                 fontSize: 11, color: _textDim))
                         : null,
@@ -714,29 +865,32 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            SizedBox(
-              width: 46,
-              height: 46,
-              child: OutlinedButton(
-                onPressed:
-                    (_streaming || _generatingImage) ? null : _generateImage,
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: _accent,
-                  side: const BorderSide(color: _border),
-                  padding: EdgeInsets.zero,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12)),
+            // 이미지 생성 진입 버튼(현재 숨김 — _showImageButton로 토글).
+            if (_showImageButton) ...[
+              SizedBox(
+                width: 46,
+                height: 46,
+                child: OutlinedButton(
+                  onPressed:
+                      (_streaming || _generatingImage) ? null : _generateImage,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: _accent,
+                    side: const BorderSide(color: _border),
+                    padding: EdgeInsets.zero,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: _generatingImage
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: _accent))
+                      : const Icon(Icons.image_outlined, size: 20),
                 ),
-                child: _generatingImage
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: _accent))
-                    : const Icon(Icons.image_outlined, size: 20),
               ),
-            ),
-            const SizedBox(width: 8),
+              const SizedBox(width: 8),
+            ],
             Expanded(
               child: TextField(
                 controller: _input,
@@ -788,6 +942,29 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 }
 
+// 사용자가 위로 올라가 있을 때만 보이는 "맨 아래로 ↓" 버튼.
+class _ScrollToBottomButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _ScrollToBottomButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: _panel2,
+      shape: const CircleBorder(side: BorderSide(color: _border)),
+      elevation: 2,
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        child: const Padding(
+          padding: EdgeInsets.all(10),
+          child: Icon(Icons.arrow_downward, size: 22, color: Colors.white),
+        ),
+      ),
+    );
+  }
+}
+
 class _EmptyState extends StatelessWidget {
   const _EmptyState();
   @override
@@ -809,7 +986,7 @@ class _EmptyState extends StatelessWidget {
 class _Bubble extends StatelessWidget {
   final Message message;
   final VoidCallback? onResend; // status=='error'일 때 재전송
-  const _Bubble({required this.message, this.onResend});
+  const _Bubble({super.key, required this.message, this.onResend});
 
   @override
   Widget build(BuildContext context) {

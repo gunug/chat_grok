@@ -25,9 +25,21 @@ const MIN_BALANCE_CREDITS = 1; // 호출 전 최소 잔액(크레딧)
 const PENDING_TTL_MS = 2 * 24 * 60 * 60 * 1000; // 버려진 행 정리 기준(2일)
 
 const XAI_BASE_URL = Deno.env.get("XAI_BASE_URL") ?? "https://api.x.ai/v1";
-const XAI_MODEL = Deno.env.get("XAI_MODEL") ?? "grok-3";
+const OPENAI_BASE_URL = Deno.env.get("OPENAI_BASE_URL") ??
+  "https://api.openai.com/v1";
+// 클라이언트가 model을 안 보낼 때(구버전)의 기본 모델. cg_models에 있어야 함.
+const DEFAULT_MODEL = Deno.env.get("DEFAULT_MODEL") ?? "gpt-4.1-mini";
 const SYSTEM_PROMPT = Deno.env.get("SYSTEM_PROMPT") ??
-  "You are Grok, a helpful and witty AI assistant. Answer clearly and concisely.";
+  "You are a helpful and witty AI assistant. Answer clearly and concisely.";
+
+// cg_models 한 행(모델 카탈로그 + 단가).
+interface ModelRow {
+  id: string;
+  provider: string; // 'openai' | 'xai'
+  input_per_mtok: number | null;
+  output_per_mtok: number | null;
+  cached_input_per_mtok: number | null;
+}
 
 const cors: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -59,16 +71,9 @@ Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
 
-  const XAI_API_KEY = Deno.env.get("XAI_API_KEY");
-  if (!XAI_API_KEY) {
-    return json(
-      { error: "XAI_API_KEY secret is not set (supabase secrets set ...)." },
-      500,
-    );
-  }
-
   let messages: Array<{ role: string; content: string }> | undefined;
   let requestId: string | undefined;
+  let model: string = DEFAULT_MODEL;
   try {
     const body = await req.json();
     messages = body.messages;
@@ -76,6 +81,7 @@ Deno.serve(async (req: Request) => {
     requestId = (typeof body.requestId === "string" && UUID_RE.test(body.requestId))
       ? body.requestId
       : crypto.randomUUID();
+    if (typeof body.model === "string" && body.model) model = body.model;
   } catch {
     return json({ error: "invalid JSON body" }, 400);
   }
@@ -111,6 +117,26 @@ Deno.serve(async (req: Request) => {
   const balance = (credit?.balance_credits as number | undefined) ?? 0;
   if (balance < MIN_BALANCE_CREDITS) {
     return json({ error: "insufficient_credit", balanceCredits: balance }, 402);
+  }
+
+  // --- 모델 검증 + provider 라우팅 -----------------------------------------
+  // 허용목록(cg_models)에 있는 활성 모델만 허용 → 임의 모델/과금 스푸핑 차단.
+  const { data: mrow } = await admin
+    .from("cg_models")
+    .select("id, provider, input_per_mtok, output_per_mtok, cached_input_per_mtok")
+    .eq("id", model)
+    .eq("enabled", true)
+    .maybeSingle();
+  if (!mrow) return json({ error: `unknown model: ${model}` }, 400);
+  const modelRow = mrow as ModelRow;
+  const isOpenai = modelRow.provider === "openai";
+  const BASE_URL = isOpenai ? OPENAI_BASE_URL : XAI_BASE_URL;
+  const API_KEY = Deno.env.get(isOpenai ? "OPENAI_API_KEY" : "XAI_API_KEY");
+  if (!API_KEY) {
+    return json(
+      { error: `${isOpenai ? "OPENAI_API_KEY" : "XAI_API_KEY"} secret is not set.` },
+      500,
+    );
   }
 
   // --- 인플라이트 행 확보(멱등) + 오래된 행 정리 ----------------------------
@@ -166,19 +192,19 @@ Deno.serve(async (req: Request) => {
     return new Response(replay, { headers: sseHeaders() });
   }
 
-  // --- xAI 호출 ------------------------------------------------------------
+  // --- provider 호출 (OpenAI/xAI 모두 OpenAI 호환 포맷) ----------------------
   const payloadMessages = messages[0]?.role === "system"
     ? messages
     : [{ role: "system", content: SYSTEM_PROMPT }, ...messages];
 
-  const upstream = await fetch(`${XAI_BASE_URL}/chat/completions`, {
+  const upstream = await fetch(`${BASE_URL}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${XAI_API_KEY}`,
+      Authorization: `Bearer ${API_KEY}`,
     },
     body: JSON.stringify({
-      model: XAI_MODEL,
+      model: modelRow.id,
       messages: payloadMessages,
       stream: true,
       stream_options: { include_usage: true },
@@ -191,7 +217,7 @@ Deno.serve(async (req: Request) => {
     if (persist) {
       await admin.from("cg_pending_chat").update({
         status: "error",
-        error: `xAI ${upstream.status}`,
+        error: `${modelRow.provider} ${upstream.status}`,
         updated_at: new Date().toISOString(),
       }).eq("request_id", requestId);
     }
@@ -262,15 +288,28 @@ Deno.serve(async (req: Request) => {
           let balanceCredits = balance;
           if (capturedUsage) {
             const u = capturedUsage;
-            const costUsd = u.cost_in_usd_ticks != null
-              ? u.cost_in_usd_ticks / 1e10
-              : 0;
+            // 비용(USD): provider가 cost를 주면(xAI ticks) 그것을, 아니면
+            // (OpenAI) cg_models 단가로 토큰×단가 계산. 캐시 입력은 할인 단가.
+            let costUsd = 0;
+            if (u.cost_in_usd_ticks != null) {
+              costUsd = u.cost_in_usd_ticks / 1e10;
+            } else if (modelRow.input_per_mtok != null) {
+              const promptTok = u.prompt_tokens ?? 0;
+              const cachedTok = u.prompt_tokens_details?.cached_tokens ?? 0;
+              const nonCached = Math.max(0, promptTok - cachedTok);
+              const cachedRate = modelRow.cached_input_per_mtok ??
+                modelRow.input_per_mtok;
+              const outRate = modelRow.output_per_mtok ?? 0;
+              costUsd = nonCached / 1e6 * modelRow.input_per_mtok +
+                cachedTok / 1e6 * cachedRate +
+                (u.completion_tokens ?? 0) / 1e6 * outRate;
+            }
             try {
               const { data: nb } = await admin.rpc("app_record_usage", {
                 p_user: user.id,
                 p_service: SERVICE_KEY,
-                p_provider: "xai",
-                p_model: XAI_MODEL,
+                p_provider: modelRow.provider,
+                p_model: modelRow.id,
                 p_action: "chat",
                 p_prompt_tokens: u.prompt_tokens ?? 0,
                 p_completion_tokens: u.completion_tokens ?? 0,

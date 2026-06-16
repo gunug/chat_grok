@@ -44,6 +44,7 @@ class Conversation {
   List<Message> messages;
   int usageTokens; // 누적 토큰
   double usageCost; // 누적 비용(USD)
+  int usageCredits; // 누적 차감 크레딧
 
   Conversation({
     required this.id,
@@ -53,6 +54,7 @@ class Conversation {
     required this.messages,
     this.usageTokens = 0,
     this.usageCost = 0,
+    this.usageCredits = 0,
   });
 
   factory Conversation.create() {
@@ -82,7 +84,11 @@ class Conversation {
         'createdAt': createdAt,
         'updatedAt': updatedAt,
         'messages': messages.map((m) => m.toJson()).toList(),
-        'usage': {'tokens': usageTokens, 'cost': usageCost},
+        'usage': {
+          'tokens': usageTokens,
+          'cost': usageCost,
+          'credits': usageCredits,
+        },
       };
 
   factory Conversation.fromJson(Map<String, dynamic> j) {
@@ -97,6 +103,7 @@ class Conversation {
           .toList(),
       usageTokens: (usage['tokens'] as num?)?.toInt() ?? 0,
       usageCost: (usage['cost'] as num?)?.toDouble() ?? 0,
+      usageCredits: (usage['credits'] as num?)?.toInt() ?? 0,
     );
   }
 }

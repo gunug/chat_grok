@@ -41,6 +41,7 @@ class ChatService {
     required List<Map<String, dynamic>> messages,
     String? accessToken,
     String? requestId,
+    String? model,
   }) async* {
     final uri = Uri.parse('$supabaseUrl/functions/v1/chat');
     final client = http.Client();
@@ -53,6 +54,7 @@ class ChatService {
       req.body = jsonEncode({
         'messages': messages,
         'requestId': ?requestId,
+        'model': ?model,
       });
 
       final resp = await client.send(req);

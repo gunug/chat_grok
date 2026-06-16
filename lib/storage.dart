@@ -11,6 +11,8 @@ class Store {
   static const _kActiveId = 'activeId';
   static const _kSupabaseUrl = 'supabaseUrl';
   static const _kAnonKey = 'supabaseAnonKey';
+  static const _kModel = 'chatModel';
+  static const defaultModel = 'gpt-4.1-mini';
 
   late SharedPreferences _prefs;
   List<Conversation> conversations = [];
@@ -89,4 +91,12 @@ class Store {
     await _prefs.setString(_kSupabaseUrl, url.trim().replaceAll(RegExp(r'/$'), ''));
     await _prefs.setString(_kAnonKey, key.trim());
   }
+
+  // 선택된 채팅 모델 id(cg_models.id). 미설정 시 기본 모델.
+  String get model {
+    final v = _prefs.getString(_kModel) ?? '';
+    return v.isNotEmpty ? v : defaultModel;
+  }
+
+  Future<void> setModel(String id) async => _prefs.setString(_kModel, id);
 }
