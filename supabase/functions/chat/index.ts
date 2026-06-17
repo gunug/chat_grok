@@ -330,22 +330,33 @@ Deno.serve(async (req: Request) => {
               balanceCredits,
             };
             // 저장(완료) — 백그라운드 클라가 복귀 후 읽음.
+            // 이미 차감(app_record_usage)이 끝났으므로, 행 갱신 실패가 바깥
+            // catch로 번져 status='error'가 되면 안 된다(재전송→이중과금).
+            // 따라서 best-effort로 삼키고 done/usage는 그대로 전송한다.
             if (persist) {
-              await admin.from("cg_pending_chat").update({
-                status: "done",
-                content,
-                usage: usageObj,
-                updated_at: new Date().toISOString(),
-              }).eq("request_id", requestId);
+              try {
+                await admin.from("cg_pending_chat").update({
+                  status: "done",
+                  content,
+                  usage: usageObj,
+                  updated_at: new Date().toISOString(),
+                }).eq("request_id", requestId);
+              } catch (e) {
+                console.error("pending done-update failed (charge already done):", e);
+              }
             }
             send(`event: usage\ndata: ${JSON.stringify(usageObj)}\n\n`);
           } else if (persist) {
-            // usage 없이 끝난 경우(드묾): 내용만 저장.
-            await admin.from("cg_pending_chat").update({
-              status: "done",
-              content,
-              updated_at: new Date().toISOString(),
-            }).eq("request_id", requestId);
+            // usage 없이 끝난 경우(드묾): 내용만 저장(과금 없음).
+            try {
+              await admin.from("cg_pending_chat").update({
+                status: "done",
+                content,
+                updated_at: new Date().toISOString(),
+              }).eq("request_id", requestId);
+            } catch (e) {
+              console.error("pending done-update (no usage) failed:", e);
+            }
           }
 
           send(`event: done\ndata: {}\n\n`);

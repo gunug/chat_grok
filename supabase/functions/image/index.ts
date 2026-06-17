@@ -164,19 +164,9 @@ Deno.serve(async (req: Request) => {
         );
       }
       const j = await r.json();
-      const raw = (j.choices?.[0]?.message?.content ?? "").toString();
-      let prompt = "";
-      let promptKo = "";
-      try {
-        const parsed = JSON.parse(raw);
-        prompt = String(parsed.prompt ?? "").trim();
-        promptKo = String(parsed.prompt_ko ?? "").trim();
-      } catch {
-        prompt = raw.trim(); // JSON 파싱 실패 시 원문을 프롬프트로 사용.
-      }
-      if (!prompt) return json({ error: "could not build an image prompt" }, 502);
 
-      // 프롬프트 생성(grok-3) 비용 차감.
+      // grok-3 호출이 성공했으면 토큰 비용이 이미 발생했으므로, 프롬프트가
+      // 비어 실패하더라도 먼저 차감한다(서비스가 API 비용을 떠안지 않음).
       const u = j.usage ?? {};
       const promptCostUsd = u.cost_in_usd_ticks != null
         ? u.cost_in_usd_ticks / 1e10
@@ -196,6 +186,25 @@ Deno.serve(async (req: Request) => {
         if (nb != null) balanceCredits = nb as number;
       } catch (e) {
         console.error("app_record_usage (compose) failed:", e);
+      }
+
+      const raw = (j.choices?.[0]?.message?.content ?? "").toString();
+      let prompt = "";
+      let promptKo = "";
+      try {
+        const parsed = JSON.parse(raw);
+        prompt = String(parsed.prompt ?? "").trim();
+        promptKo = String(parsed.prompt_ko ?? "").trim();
+      } catch {
+        prompt = raw.trim(); // JSON 파싱 실패 시 원문을 프롬프트로 사용.
+      }
+      if (!prompt) {
+        // 비용은 이미 차감됨 → 갱신된 잔액을 함께 알려 클라가 반영하도록.
+        return json({
+          error: "could not build an image prompt",
+          creditsCharged: balance - balanceCredits,
+          balanceCredits,
+        }, 502);
       }
 
       // 이미지 생성(render) 시 차감될 크레딧 미리 계산(동일 비용 → 동일 공식).

@@ -137,6 +137,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Message? _anchorMsg;
   final _anchorKey = GlobalKey();
   List<ChatModel> _models = const []; // cg_models에서 로드한 선택 가능한 모델
+  double? _creditPerUsd; // $1당 차감 크레딧(마크업 반영) — 예상 단가 표시용
 
   Conversation? get _conv => store.active;
 
@@ -149,6 +150,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     fetchModels().then((m) {
       if (mounted && m.isNotEmpty) setState(() => _models = m);
     });
+    fetchCreditPerUsd().then((f) {
+      if (mounted && f != null) setState(() => _creditPerUsd = f);
+    });
     // 백그라운드에서 서버가 완료해 둔 답변이 있으면 이어받는다.
     WidgetsBinding.instance.addPostFrameCallback((_) => _reconcileAllPending());
   }
@@ -159,6 +163,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (m.id == id) return m.label;
     }
     return id;
+  }
+
+  // 모델별 예상 단가(마크업 반영 크레딧, 1K토큰당). 입력·출력 평균으로 합쳐
+  // 단일 값 표시. 단가/환산계수 없으면 빈 문자열.
+  String _modelPriceLine(ChatModel m) {
+    final f = _creditPerUsd;
+    if (f == null || m.inputRate == null || m.outputRate == null) return '';
+    final avgPerMtok = (m.inputRate! + m.outputRate!) / 2; // USD/1M
+    final per1k = (avgPerMtok * f / 1000).round();
+    return '≈ 1K토큰당 ${formatCredits(per1k)} 크레딧';
   }
 
   // 모델 선택 시트(provider별 그룹).
@@ -192,11 +206,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     if (mounted) setState(() {});
                   },
                   title: Text(m.label),
-                  subtitle: m.provider.isNotEmpty
-                      ? Text(
-                          m.provider == 'openai' ? 'OpenAI' : 'xAI (Grok)',
-                          style: const TextStyle(fontSize: 11, color: _textDim))
-                      : null,
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (m.provider.isNotEmpty)
+                        Text(m.provider == 'openai' ? 'OpenAI' : 'xAI (Grok)',
+                            style: const TextStyle(
+                                fontSize: 11, color: _textDim)),
+                      if (_modelPriceLine(m).isNotEmpty)
+                        Text(_modelPriceLine(m),
+                            style: const TextStyle(
+                                fontSize: 11, color: _textDim)),
+                    ],
+                  ),
                   trailing: m.id == store.model
                       ? const Icon(Icons.check, color: _accent)
                       : null,
@@ -672,6 +694,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     setState(() => store.activeId = id);
     store.save();
     Navigator.pop(context);
+    // 이전 대화를 열면 가장 최근 메시지가 보이도록 바닥으로(애니메이션 없이 즉시).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scroll.hasClients) {
+        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      }
+    });
   }
 
   void _deleteConv(String id) {
@@ -727,29 +755,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             ],
           ),
         ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(38),
-          child: InkWell(
-            onTap: _pickModel,
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.tune, size: 15, color: _textDim),
-                  const SizedBox(width: 6),
-                  Flexible(
-                    child: Text('모델: $_modelLabel',
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 12.5, color: _textDim)),
-                  ),
-                  const Icon(Icons.arrow_drop_down, size: 18, color: _textDim),
-                ],
-              ),
-            ),
-          ),
-        ),
       ),
       drawer: _buildDrawer(),
       body: Column(
@@ -891,6 +896,35 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               ),
               const SizedBox(width: 8),
             ],
+            // 모델 선택 버튼 (입력창 왼쪽).
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 124),
+              child: OutlinedButton(
+                onPressed: _streaming ? null : _pickModel,
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: _textDim,
+                  side: const BorderSide(color: _border),
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  minimumSize: const Size(0, 46),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.tune, size: 16),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(_modelLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 12)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
             Expanded(
               child: TextField(
                 controller: _input,
