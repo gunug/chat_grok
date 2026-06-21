@@ -1,6 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Network access for calling the Supabase Edge Function. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Saving generated images to the gallery (gal). API 30+ uses MediaStore
+         and needs no permission; API ≤29 needs WRITE_EXTERNAL_STORAGE. -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29"/>
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION"/>
     <application
         android:label="simple chat bot"
         android:name="${applicationName}"

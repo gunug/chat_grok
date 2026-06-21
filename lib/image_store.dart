@@ -13,21 +13,28 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// One saved image: where its bytes are + how it was made.
 class GalleryImage {
   final String path;
-  final String prompt;
+  final String prompt; // English prompt actually sent to the image model
+  final String promptKo; // Korean translation (display only; '' for old entries)
   final int createdAt; // epoch ms
 
   GalleryImage({
     required this.path,
     required this.prompt,
+    this.promptKo = '',
     required this.createdAt,
   });
 
-  Map<String, dynamic> toJson() =>
-      {'path': path, 'prompt': prompt, 'createdAt': createdAt};
+  Map<String, dynamic> toJson() => {
+        'path': path,
+        'prompt': prompt,
+        if (promptKo.isNotEmpty) 'promptKo': promptKo,
+        'createdAt': createdAt,
+      };
 
   factory GalleryImage.fromJson(Map<String, dynamic> j) => GalleryImage(
         path: j['path'] as String,
         prompt: (j['prompt'] as String?) ?? '',
+        promptKo: (j['promptKo'] as String?) ?? '',
         createdAt: (j['createdAt'] as num?)?.toInt() ?? 0,
       );
 
@@ -50,13 +57,15 @@ class ImageStore {
       SharedPreferences.getInstance();
 
   /// Saves [bytes] to a new file and records it in the index. Returns its path.
-  static Future<String> save(Uint8List bytes, String prompt) async {
+  static Future<String> save(Uint8List bytes, String prompt,
+      {String promptKo = ''}) async {
     final dir = await _dir();
     final ts = DateTime.now().millisecondsSinceEpoch;
     final path = '${dir.path}/img_$ts.jpg';
     await File(path).writeAsBytes(bytes, flush: true);
 
-    final entry = GalleryImage(path: path, prompt: prompt, createdAt: ts);
+    final entry = GalleryImage(
+        path: path, prompt: prompt, promptKo: promptKo, createdAt: ts);
     final items = await list();
     items.insert(0, entry); // newest first
     await _persist(items);

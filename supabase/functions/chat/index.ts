@@ -41,6 +41,88 @@ interface ModelRow {
   cached_input_per_mtok: number | null;
 }
 
+// provider별 "실제 보유 모델 id" 캐시(웜 인스턴스 간 재사용). 목록 조회는
+// 메타데이터라 토큰 과금 없음. null = 조회 실패(fail-open: 숨기지 않음).
+const MODELS_CACHE_MS = 30 * 60 * 1000;
+let _modelsCache: { at: number; openai: Set<string> | null; xai: Set<string> | null } =
+  { at: 0, openai: null, xai: null };
+
+async function fetchAvailableChatModelIds() {
+  const now = Date.now();
+  if (
+    now - _modelsCache.at < MODELS_CACHE_MS &&
+    (_modelsCache.openai || _modelsCache.xai)
+  ) {
+    return _modelsCache;
+  }
+  let openai: Set<string> | null = null;
+  try {
+    const key = Deno.env.get("OPENAI_API_KEY");
+    if (key) {
+      const r = await fetch(`${OPENAI_BASE_URL}/models`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      // deno-lint-ignore no-explicit-any
+      if (r.ok) { const j = await r.json(); openai = new Set((j.data ?? []).map((m: any) => String(m.id))); }
+    }
+  } catch (_) { /* fail-open */ }
+  let xai: Set<string> | null = null;
+  try {
+    const key = Deno.env.get("XAI_API_KEY");
+    if (key) {
+      // 텍스트 모델 목록(id + aliases). 예: grok-3/grok-4 → grok-4.3 alias.
+      const r = await fetch(`${XAI_BASE_URL}/language-models`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      if (r.ok) {
+        const j = await r.json();
+        const s = new Set<string>();
+        // deno-lint-ignore no-explicit-any
+        for (const m of (j.models ?? []) as any[]) {
+          if (m.id) s.add(String(m.id));
+          for (const a of (m.aliases ?? [])) s.add(String(a));
+        }
+        xai = s;
+      }
+    }
+  } catch (_) { /* fail-open */ }
+  _modelsCache = { at: now, openai, xai };
+  return _modelsCache;
+}
+
+// cg_models(enabled) ∩ provider 실보유 목록. 정렬: provider(OpenAI→xAI) →
+// 가격(출력단가) 내림차순. 토큰 과금 없음.
+// deno-lint-ignore no-explicit-any
+async function listAvailableChatModels(admin: any): Promise<Response> {
+  const { data: rows } = await admin
+    .from("cg_models")
+    .select("id, provider, label, input_per_mtok, output_per_mtok")
+    .eq("enabled", true);
+  const candidates = (rows ?? []);
+  const cache = await fetchAvailableChatModelIds();
+  const rank = (p: string) => (p === "openai" ? 0 : p === "xai" ? 1 : 2);
+  // deno-lint-ignore no-explicit-any
+  const price = (m: any) => Number(m.output_per_mtok ?? m.input_per_mtok ?? 0);
+  const models = candidates
+    // deno-lint-ignore no-explicit-any
+    .filter((c: any) => {
+      const set = c.provider === "openai" ? cache.openai : cache.xai;
+      if (set == null) return true;
+      return set.has(c.id);
+    })
+    // deno-lint-ignore no-explicit-any
+    .sort((a: any, b: any) => rank(a.provider) - rank(b.provider) || price(b) - price(a))
+    // deno-lint-ignore no-explicit-any
+    .map((c: any) => ({
+      id: c.id,
+      provider: c.provider,
+      label: c.label,
+      input_per_mtok: c.input_per_mtok,
+      output_per_mtok: c.output_per_mtok,
+    }));
+  return json({ models });
+}
+
 const cors: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -74,9 +156,11 @@ Deno.serve(async (req: Request) => {
   let messages: Array<{ role: string; content: string }> | undefined;
   let requestId: string | undefined;
   let model: string = DEFAULT_MODEL;
+  let mode = "chat";
   try {
     const body = await req.json();
     messages = body.messages;
+    if (typeof body.mode === "string" && body.mode) mode = body.mode;
     // 클라이언트가 보낸 멱등 키. 없거나 형식이 틀리면 서버가 생성(구버전 호환).
     requestId = (typeof body.requestId === "string" && UUID_RE.test(body.requestId))
       ? body.requestId
@@ -85,7 +169,7 @@ Deno.serve(async (req: Request) => {
   } catch {
     return json({ error: "invalid JSON body" }, 400);
   }
-  if (!Array.isArray(messages) || messages.length === 0) {
+  if (mode !== "models" && (!Array.isArray(messages) || messages.length === 0)) {
     return json({ error: "messages[] is required" }, 400);
   }
 
@@ -102,6 +186,9 @@ Deno.serve(async (req: Request) => {
   if (!user) return json({ error: "unauthorized" }, 401);
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
+
+  // mode: models — 사용 가능한 채팅 모델 목록(크레딧 게이트 불필요, 과금 없음).
+  if (mode === "models") return await listAvailableChatModels(admin);
 
   await admin.rpc("app_register_service", {
     p_user: user.id,
@@ -213,6 +300,12 @@ Deno.serve(async (req: Request) => {
 
   if (!upstream.ok || !upstream.body) {
     const detail = await upstream.text().catch(() => "");
+    // 모델 미보유("does not exist"/404)면 카탈로그에서 자동 비활성화(best-effort).
+    if (upstream.status === 404 ||
+        /does not exist|model_not_found|not[_ ]?found/i.test(detail)) {
+      admin.from("cg_models").update({ enabled: false })
+        .eq("id", modelRow.id).then(() => {}, () => {});
+    }
     // 토큰 생성 전 실패 → 과금 없음. 행은 error로 표시(있으면).
     if (persist) {
       await admin.from("cg_pending_chat").update({

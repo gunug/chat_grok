@@ -71,17 +71,25 @@ class ImageService {
     throw ImageError(detail != null ? '$msg: $detail' : msg);
   }
 
-  /// Step 1 — build the scene prompt (cheap; not charged).
+  /// Step 1 — build the scene prompt (cheap; not charged). [model] is the
+  /// image model id used only to preview its per-image credit cost.
   static Future<ComposedPrompt> compose({
     required String supabaseUrl,
     required String anonKey,
     required List<Map<String, dynamic>> messages,
     String? accessToken,
+    String? model,
+    String? promptModel,
   }) async {
     final resp = await http.post(
       _uri(supabaseUrl),
       headers: _headers(anonKey, accessToken),
-      body: jsonEncode({'mode': 'compose', 'messages': messages}),
+      body: jsonEncode({
+        'mode': 'compose',
+        'messages': messages,
+        'model': ?model,
+        'promptModel': ?promptModel,
+      }),
     );
     if (resp.statusCode != 200) _throwFor(resp);
     final j = jsonDecode(resp.body) as Map<String, dynamic>;
@@ -96,17 +104,23 @@ class ImageService {
     );
   }
 
-  /// Step 2 — render the confirmed prompt. Charges credits even if blocked.
+  /// Step 2 — render the confirmed prompt with [model]. xAI charges credits
+  /// even if blocked; OpenAI does not.
   static Future<RenderResult> render({
     required String supabaseUrl,
     required String anonKey,
     required String prompt,
     String? accessToken,
+    String? model,
   }) async {
     final resp = await http.post(
       _uri(supabaseUrl),
       headers: _headers(anonKey, accessToken),
-      body: jsonEncode({'mode': 'render', 'prompt': prompt}),
+      body: jsonEncode({
+        'mode': 'render',
+        'prompt': prompt,
+        'model': ?model,
+      }),
     );
     if (resp.statusCode != 200) _throwFor(resp);
     final j = jsonDecode(resp.body) as Map<String, dynamic>;

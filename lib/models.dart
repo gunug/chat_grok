@@ -45,6 +45,9 @@ class Conversation {
   int usageTokens; // 누적 토큰
   double usageCost; // 누적 비용(USD)
   int usageCredits; // 누적 차감 크레딧
+  // 'chat' = 일반 대화, 'image_prompt' = 프롬프트 직접(raw) 이미지,
+  // 'image_chat' = 대화로 AI가 프롬프트 생성하는 이미지.
+  String kind;
 
   Conversation({
     required this.id,
@@ -55,22 +58,36 @@ class Conversation {
     this.usageTokens = 0,
     this.usageCost = 0,
     this.usageCredits = 0,
+    this.kind = 'chat',
   });
 
-  factory Conversation.create() {
+  bool get isImage => kind == 'image_prompt' || kind == 'image_chat';
+  bool get isImagePrompt => kind == 'image_prompt';
+  bool get isImageChat => kind == 'image_chat';
+
+  // 종류별 기본 제목(첫 메시지로 자동 변경되기 전까지).
+  static const _defaultTitles = {'새 대화', '새 이미지', '새 대화 이미지'};
+  static String _titleFor(String kind) => kind == 'image_prompt'
+      ? '새 이미지'
+      : kind == 'image_chat'
+          ? '새 대화 이미지'
+          : '새 대화';
+
+  factory Conversation.create({String kind = 'chat'}) {
     final now = DateTime.now().millisecondsSinceEpoch;
     return Conversation(
       id: 'c${now.toRadixString(36)}',
-      title: '새 대화',
+      title: _titleFor(kind),
       createdAt: now,
       updatedAt: now,
       messages: [],
+      kind: kind,
     );
   }
 
   // Auto-title from the first user message (matches the web app).
   void retitleIfNeeded() {
-    if (title != '새 대화') return;
+    if (!_defaultTitles.contains(title)) return;
     final firstUser = messages.where((m) => m.role == 'user');
     if (firstUser.isNotEmpty) {
       final t = firstUser.first.content.replaceAll(RegExp(r'\s+'), ' ').trim();
@@ -83,6 +100,7 @@ class Conversation {
         'title': title,
         'createdAt': createdAt,
         'updatedAt': updatedAt,
+        'kind': kind,
         'messages': messages.map((m) => m.toJson()).toList(),
         'usage': {
           'tokens': usageTokens,
@@ -98,6 +116,10 @@ class Conversation {
       title: (j['title'] as String?) ?? '새 대화',
       createdAt: (j['createdAt'] as num?)?.toInt() ?? 0,
       updatedAt: (j['updatedAt'] as num?)?.toInt() ?? 0,
+      // 구버전 'image'(대화로 프롬프트 생성하던 단일 이미지 세션) → 'image_chat'.
+      kind: ((j['kind'] as String?) ?? 'chat') == 'image'
+          ? 'image_chat'
+          : (j['kind'] as String?) ?? 'chat',
       messages: ((j['messages'] as List?) ?? [])
           .map((e) => Message.fromJson(Map<String, dynamic>.from(e)))
           .toList(),

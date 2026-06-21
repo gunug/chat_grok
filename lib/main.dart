@@ -1,8 +1,8 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:share_plus/share_plus.dart';
+import 'package:flutter/services.dart';
+import 'package:gal/gal.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'models.dart';
@@ -12,8 +12,9 @@ import 'models_catalog.dart';
 import 'pending_chat.dart';
 import 'image_service.dart';
 import 'image_store.dart';
+import 'prompt_store.dart';
 import 'gallery_screen.dart';
-import 'settings_screen.dart';
+import 'prompt_history_screen.dart';
 import 'credits_screen.dart';
 import 'credits.dart';
 import 'login_screen.dart';
@@ -137,9 +138,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Message? _anchorMsg;
   final _anchorKey = GlobalKey();
   List<ChatModel> _models = const []; // cg_models에서 로드한 선택 가능한 모델
+  List<ImageModel> _imageModels = const []; // cg_image_models에서 로드한 이미지 모델
   double? _creditPerUsd; // $1당 차감 크레딧(마크업 반영) — 예상 단가 표시용
 
   Conversation? get _conv => store.active;
+  bool get _isImageConv => _conv?.isImage ?? false;
 
   @override
   void initState() {
@@ -149,6 +152,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     refreshCredit(); // 로그인 후 잔액 로드
     fetchModels().then((m) {
       if (mounted && m.isNotEmpty) setState(() => _models = m);
+    });
+    fetchImageModels().then((m) {
+      if (mounted && m.isNotEmpty) setState(() => _imageModels = m);
     });
     fetchCreditPerUsd().then((f) {
       if (mounted && f != null) setState(() => _creditPerUsd = f);
@@ -163,6 +169,182 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (m.id == id) return m.label;
     }
     return id;
+  }
+
+  String get _imageModelLabel {
+    final id = store.imageModel;
+    for (final m in _imageModels) {
+      if (m.id == id) return m.label;
+    }
+    return id;
+  }
+
+  // 이미지 모델별 1장당 예상 크레딧(마크업 반영). 가격/환산계수 없으면 빈 문자열.
+  String _imageModelPriceLine(ImageModel m) {
+    final f = _creditPerUsd;
+    if (f == null || m.priceUsd == null) return '';
+    return '≈ 1장당 ${formatCredits((m.priceUsd! * f).round())} 크레딧';
+  }
+
+  // 이미지 모델 선택 시트(provider별 표시).
+  Future<void> _pickImageModel() async {
+    final models = _imageModels.isNotEmpty
+        ? _imageModels
+        : [ImageModel(id: store.imageModel, provider: '', label: store.imageModel)];
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: _panel,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) {
+        return SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 8, 16, 8),
+                child: Text('이미지 모델 선택',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+              for (final m in models)
+                ListTile(
+                  onTap: () async {
+                    final nav = Navigator.of(context);
+                    await store.setImageModel(m.id);
+                    nav.pop();
+                    if (mounted) setState(() {});
+                  },
+                  title: Text(m.label),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (m.provider.isNotEmpty)
+                        Text(m.provider == 'openai' ? 'OpenAI' : 'xAI (Grok)',
+                            style: const TextStyle(
+                                fontSize: 11, color: _textDim)),
+                      if (_imageModelPriceLine(m).isNotEmpty)
+                        Text(_imageModelPriceLine(m),
+                            style: const TextStyle(
+                                fontSize: 11, color: _textDim)),
+                    ],
+                  ),
+                  trailing: m.id == store.imageModel
+                      ? const Icon(Icons.check, color: _accent)
+                      : null,
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // 대화 이미지 모드 모델 시트: 프롬프트 생성 모델(cg_models) + 이미지 모델
+  // (cg_image_models)을 한 시트에서 함께 고른다.
+  Future<void> _pickImageChatModels() async {
+    final chatModels = _models.isNotEmpty
+        ? _models
+        : [ChatModel(id: store.promptModel, provider: '', label: store.promptModel)];
+    final imgModels = _imageModels.isNotEmpty
+        ? _imageModels
+        : [ImageModel(id: store.imageModel, provider: '', label: store.imageModel)];
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: _panel,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) {
+        return SafeArea(
+          child: StatefulBuilder(
+            builder: (ctx, setSheet) {
+              return ConstrainedBox(
+                constraints: BoxConstraints(
+                    maxHeight: MediaQuery.of(context).size.height * 0.8),
+                child: ListView(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(16, 8, 16, 4),
+                      child: Text('프롬프트 생성 모델',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                    ),
+                    for (final m in chatModels)
+                      ListTile(
+                        dense: true,
+                        onTap: () async {
+                          await store.setPromptModel(m.id);
+                          setSheet(() {});
+                          if (mounted) setState(() {});
+                        },
+                        title: Text(m.label),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (m.provider.isNotEmpty)
+                              Text(
+                                  m.provider == 'openai'
+                                      ? 'OpenAI'
+                                      : 'xAI (Grok)',
+                                  style: const TextStyle(
+                                      fontSize: 11, color: _textDim)),
+                            if (_modelPriceLine(m).isNotEmpty)
+                              Text(_modelPriceLine(m),
+                                  style: const TextStyle(
+                                      fontSize: 11, color: _textDim)),
+                          ],
+                        ),
+                        trailing: m.id == store.promptModel
+                            ? const Icon(Icons.check, color: _accent)
+                            : null,
+                      ),
+                    const Divider(color: _border, height: 16),
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(16, 4, 16, 4),
+                      child: Text('이미지 모델',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                    ),
+                    for (final m in imgModels)
+                      ListTile(
+                        dense: true,
+                        onTap: () async {
+                          await store.setImageModel(m.id);
+                          setSheet(() {});
+                          if (mounted) setState(() {});
+                        },
+                        title: Text(m.label),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (m.provider.isNotEmpty)
+                              Text(
+                                  m.provider == 'openai'
+                                      ? 'OpenAI'
+                                      : 'xAI (Grok)',
+                                  style: const TextStyle(
+                                      fontSize: 11, color: _textDim)),
+                            if (_imageModelPriceLine(m).isNotEmpty)
+                              Text(_imageModelPriceLine(m),
+                                  style: const TextStyle(
+                                      fontSize: 11, color: _textDim)),
+                          ],
+                        ),
+                        trailing: m.id == store.imageModel
+                            ? const Icon(Icons.check, color: _accent)
+                            : null,
+                      ),
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
   }
 
   // 모델별 예상 단가(마크업 반영 크레딧, 1K토큰당). 입력·출력 평균으로 합쳐
@@ -296,6 +478,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _send() async {
+    final c = _conv;
+    if (c != null && c.isImagePrompt) {
+      await _sendDirectImage();
+      return;
+    }
+    if (c != null && c.isImageChat) {
+      await _sendComposeImage();
+      return;
+    }
     final text = _input.text.trim();
     if (text.isEmpty || _streaming) return;
     if (currentAccessToken() == null) return; // 안전장치
@@ -308,6 +499,240 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
     final history = _history(conv); // bot 추가 전에 계산
     await _streamInto(conv, history);
+  }
+
+  // 선택한 이미지 모델의 1장당 예상 크레딧(없으면 null).
+  int? _imageCreditEstimate() {
+    final f = _creditPerUsd;
+    if (f == null) return null;
+    for (final m in _imageModels) {
+      if (m.id == store.imageModel && m.priceUsd != null) {
+        return (m.priceUsd! * f).round();
+      }
+    }
+    return null;
+  }
+
+  // 프롬프트 이미지(직접): 입력한 프롬프트를 그대로(raw) 보낸다. compose 없음.
+  // 차단돼도 과금되므로 간단한 비용 확인창만 띄운다.
+  Future<void> _sendDirectImage() async {
+    final text = _input.text.trim();
+    if (text.isEmpty || _generatingImage || _streaming) return;
+    final token = currentAccessToken();
+    if (token == null) return;
+    final conv = _conv;
+    if (conv == null) return;
+
+    final go = await _confirmDirectImageDialog(text);
+    if (!go) return;
+
+    _input.clear();
+    conv.messages.add(Message('user', text));
+    conv.retitleIfNeeded();
+    conv.updatedAt = DateTime.now().millisecondsSinceEpoch;
+    setState(() => _generatingImage = true);
+    await store.save();
+    _scrollToBottom();
+
+    // 직접 입력 프롬프트를 히스토리에 기록(렌더 결과로 상태 갱신).
+    final promptId = await PromptStore.add(
+        prompt: text, model: store.imageModel, mode: 'prompt');
+
+    await _renderInto(conv,
+        prompt: text, promptKo: '', token: token, promptId: promptId);
+  }
+
+  // 대화 이미지(자동): 입력 + 이전 대화 맥락을 서버가 안전한 영문 프롬프트로
+  // 변환(compose)해 확인창에 보여주고, 확인하면 렌더한다.
+  Future<void> _sendComposeImage() async {
+    final text = _input.text.trim();
+    if (text.isEmpty || _generatingImage || _streaming) return;
+    final token = currentAccessToken();
+    if (token == null) return;
+    final conv = _conv;
+    if (conv == null) return;
+
+    _input.clear();
+    conv.messages.add(Message('user', text));
+    conv.retitleIfNeeded();
+    conv.updatedAt = DateTime.now().millisecondsSinceEpoch;
+    setState(() => _generatingImage = true);
+    await store.save();
+    _scrollToBottom();
+
+    // 1단계: 입력+맥락 → 안전한 영문 프롬프트(+한글). grok-3 토큰 비용 차감.
+    // 이전 대화 맥락(비어있지 않은 메시지)을 함께 보내 여러 턴 다듬기를 지원.
+    final history = conv.messages
+        .where((m) => m.content.trim().isNotEmpty)
+        .map((m) => {'role': m.role, 'content': m.content})
+        .toList();
+    ComposedPrompt composed;
+    try {
+      composed = await ImageService.compose(
+        supabaseUrl: store.supabaseUrl,
+        anonKey: store.anonKey,
+        accessToken: token,
+        messages: history,
+        model: store.imageModel, // 선택 모델의 1장당 예상 크레딧 미리보기용
+        promptModel: store.promptModel, // 프롬프트 생성용 텍스트 모델
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('⚠ $e'), backgroundColor: Colors.red[900]),
+        );
+        setState(() => _generatingImage = false);
+      }
+      await store.save();
+      return;
+    }
+    // compose에도 비용이 들었으므로 차감된 잔액/누적을 즉시 반영.
+    if (composed.balanceCredits != null) {
+      setBalanceCredits(composed.balanceCredits!);
+    }
+    conv.usageCredits += composed.creditsCharged ?? 0;
+
+    // 프롬프트가 만들어진 즉시 히스토리에 기록 → 아래에서 생성을 포기(취소)해도
+    // 'composed'(프롬프트만) 상태로 남는다. 생성하면 결과로 상태 갱신.
+    final promptId = await PromptStore.add(
+        prompt: composed.prompt,
+        promptKo: composed.promptKo,
+        model: store.imageModel,
+        mode: 'chat');
+
+    // 확인창: 영문 프롬프트 + 한글 번역 + 예상 크레딧/차단 시에도 과금 고지.
+    final go = mounted ? await _confirmImageDialog(composed) : false;
+    if (!go) {
+      if (mounted) setState(() => _generatingImage = false);
+      return; // 프롬프트만 기록된 채로 종료(포기).
+    }
+
+    await _renderInto(conv,
+        prompt: composed.prompt,
+        promptKo: composed.promptKo,
+        token: token,
+        promptId: promptId);
+  }
+
+  // 확인된 프롬프트로 렌더 → 성공 시 이미지 저장, 차단/오류 처리. 두 이미지
+  // 모드가 공유한다. 호출 전 _generatingImage=true 가정, 끝나면 false로 해제.
+  Future<void> _renderInto(Conversation conv,
+      {required String prompt,
+      required String promptKo,
+      required String token,
+      String? promptId}) async {
+    final bot = Message('assistant', '🖼 이미지를 생성하는 중…');
+    conv.messages.add(bot);
+    await store.save();
+    _scrollToBottom();
+
+    String status = 'failed';
+    try {
+      final result = await ImageService.render(
+        supabaseUrl: store.supabaseUrl,
+        anonKey: store.anonKey,
+        accessToken: token,
+        prompt: prompt,
+        model: store.imageModel,
+      );
+      if (result.balanceCredits != null) {
+        setBalanceCredits(result.balanceCredits!);
+      }
+      conv.usageCredits += result.creditsCharged ?? 0;
+      if (result.blocked || result.bytes == null) {
+        status = result.blocked ? 'blocked' : 'failed';
+        conv.messages.remove(bot);
+        if (mounted) {
+          final charged = result.creditsCharged ?? 0;
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            backgroundColor: Colors.orange[900],
+            content: Text(charged > 0
+                ? '이미지가 정책상 차단되었습니다. API 비용이 부과되어 '
+                    '$charged 크레딧이 차감되었습니다.'
+                : '이미지가 정책상 차단되었습니다. (과금 없음)'),
+          ));
+        }
+      } else {
+        status = 'success';
+        final path = await ImageStore.save(result.bytes!, result.prompt,
+            promptKo: promptKo);
+        bot.content = '';
+        bot.imagePath = path;
+      }
+    } catch (e) {
+      status = 'failed';
+      conv.messages.remove(bot);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('⚠ $e'), backgroundColor: Colors.red[900]),
+        );
+      }
+    }
+    if (promptId != null) await PromptStore.updateStatus(promptId, status);
+    conv.updatedAt = DateTime.now().millisecondsSinceEpoch;
+    await store.save();
+    if (mounted) setState(() => _generatingImage = false);
+    _scrollToBottom();
+  }
+
+  // 프롬프트 이미지(직접) 모드의 간단 비용 확인창.
+  Future<bool> _confirmDirectImageDialog(String prompt) async {
+    final est = _imageCreditEstimate();
+    final estText = est != null ? formatCredits(est) : '?';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: _panel,
+        title: const Text('이미지 생성 확인'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('전송 프롬프트',
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: _textDim)),
+            const SizedBox(height: 4),
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(context).size.height * 0.35),
+              child: SingleChildScrollView(
+                child: SelectableText(prompt,
+                    style: const TextStyle(fontSize: 13, height: 1.4)),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0x33FF9800),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0x66FF9800)),
+              ),
+              child: Text(
+                '⚠ 이미지 생성에 약 $estText 크레딧이 차감되며, 정책상 '
+                '차단되더라도 비용이 부과될 수 있습니다(입력 그대로 전송).',
+                style: const TextStyle(fontSize: 12.5, height: 1.5),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: FilledButton.styleFrom(backgroundColor: _accent),
+            child: const Text('생성하기'),
+          ),
+        ],
+      ),
+    );
+    return ok ?? false;
   }
 
   // 실패(error 상태)한 봇 메시지를 같은 맥락으로 다시 요청한다.
@@ -536,6 +961,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         anonKey: store.anonKey,
         accessToken: token,
         prompt: composed.prompt,
+        model: store.imageModel,
       );
       if (result.balanceCredits != null) {
         setBalanceCredits(result.balanceCredits!);
@@ -544,15 +970,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (result.blocked || result.bytes == null) {
         conv.messages.remove(bot);
         if (mounted) {
+          final charged = result.creditsCharged ?? 0;
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             backgroundColor: Colors.orange[900],
-            content: Text(
-                '이미지가 xAI 정책상 차단되었습니다. API 비용이 부과되어 '
-                '${result.creditsCharged ?? 0} 크레딧이 차감되었습니다.'),
+            content: Text(charged > 0
+                ? '이미지가 정책상 차단되었습니다. API 비용이 부과되어 '
+                    '$charged 크레딧이 차감되었습니다.'
+                : '이미지가 정책상 차단되었습니다. (과금 없음)'),
           ));
         }
       } else {
-        final path = await ImageStore.save(result.bytes!, result.prompt);
+        final path = await ImageStore.save(result.bytes!, result.prompt,
+            promptKo: composed.promptKo);
         bot.content = '';
         bot.imagePath = path;
       }
@@ -656,18 +1085,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         MaterialPageRoute(builder: (_) => const GalleryScreen()),
       );
 
-  Future<void> _openSettings({bool prompt = false}) async {
-    if (prompt) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('먼저 설정에서 Supabase URL과 anon key를 입력하세요.'),
-      ));
-    }
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => SettingsScreen(store: store)),
-    );
-    if (mounted) setState(() {});
-  }
+  void _openPromptHistory() => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const PromptHistoryScreen()),
+      );
 
   Future<void> _openCredits() async {
     await Navigator.push(
@@ -690,6 +1111,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     Navigator.pop(context); // close drawer
   }
 
+  void _newPromptImage() {
+    setState(() => store.createConversation(kind: 'image_prompt'));
+    Navigator.pop(context); // close drawer
+  }
+
+  void _newChatImage() {
+    setState(() => store.createConversation(kind: 'image_chat'));
+    Navigator.pop(context); // close drawer
+  }
+
   void _selectConv(String id) {
     setState(() => store.activeId = id);
     store.save();
@@ -706,23 +1137,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     setState(() => store.remove(id));
   }
 
-  void _export(bool asJson) {
-    final c = _conv;
-    if (c == null || c.messages.isEmpty) return;
-    final String content;
-    if (asJson) {
-      content = const JsonEncoder.withIndent('  ').convert(c.toJson());
-    } else {
-      final b = StringBuffer('# ${c.title}\n\n');
-      for (final m in c.messages) {
-        b.writeln(m.role == 'user' ? '**🧑 나**' : '**✦ Grok**');
-        b.writeln('\n${m.content}\n\n---\n');
-      }
-      content = b.toString();
-    }
-    Share.share(content, subject: c.title);
-  }
-
   @override
   Widget build(BuildContext context) {
     final conv = _conv;
@@ -737,19 +1151,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           PopupMenuButton<String>(
             onSelected: (v) {
               if (v == 'gallery') _openGallery();
-              if (v == 'md') _export(false);
-              if (v == 'json') _export(true);
+              if (v == 'prompts') _openPromptHistory();
               if (v == 'credits') _openCredits();
-              if (v == 'settings') _openSettings();
               if (v == 'logs') _openLogs();
               if (v == 'logout') _logout();
             },
             itemBuilder: (_) => const [
               PopupMenuItem(value: 'gallery', child: Text('이미지 갤러리')),
-              PopupMenuItem(value: 'md', child: Text('Markdown 내보내기')),
-              PopupMenuItem(value: 'json', child: Text('JSON 내보내기')),
+              PopupMenuItem(value: 'prompts', child: Text('프롬프트 히스토리')),
               PopupMenuItem(value: 'credits', child: Text('크레딧')),
-              PopupMenuItem(value: 'settings', child: Text('설정')),
               PopupMenuItem(value: 'logs', child: Text('로그')),
               PopupMenuItem(value: 'logout', child: Text('로그아웃')),
             ],
@@ -761,7 +1171,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         children: [
           Expanded(
             child: messages.isEmpty
-                ? const _EmptyState()
+                ? _EmptyState(kind: conv?.kind ?? 'chat')
                 : Stack(
                     children: [
                       ListView.builder(
@@ -805,13 +1215,47 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         child: Column(
           children: [
             Padding(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
               child: SizedBox(
                 width: double.infinity,
                 child: OutlinedButton.icon(
                   onPressed: _newChat,
                   icon: const Icon(Icons.add),
                   label: const Text('새 대화'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side: const BorderSide(color: _border),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    alignment: Alignment.centerLeft,
+                  ),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+              child: SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _newPromptImage,
+                  icon: const Icon(Icons.brush_outlined),
+                  label: const Text('프롬프트 이미지'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side: const BorderSide(color: _border),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    alignment: Alignment.centerLeft,
+                  ),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+              child: SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _newChatImage,
+                  icon: const Icon(Icons.auto_awesome_outlined),
+                  label: const Text('대화 이미지'),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Colors.white,
                     side: const BorderSide(color: _border),
@@ -829,6 +1273,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   return ListTile(
                     selected: selected,
                     selectedTileColor: _panel,
+                    leading: Icon(
+                      c.isImagePrompt
+                          ? Icons.brush_outlined
+                          : c.isImageChat
+                              ? Icons.auto_awesome_outlined
+                              : Icons.chat_bubble_outline,
+                      size: 20,
+                      color: _textDim,
+                    ),
                     title: Text(c.title,
                         maxLines: 1, overflow: TextOverflow.ellipsis),
                     subtitle: (c.usageTokens > 0 || c.usageCredits > 0)
@@ -896,11 +1349,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               ),
               const SizedBox(width: 8),
             ],
-            // 모델 선택 버튼 (입력창 왼쪽).
+            // 모델 선택 버튼 (입력창 왼쪽). 채팅 대화는 채팅 모델, 이미지
+            // 대화는 이미지 모델 선택 버튼을 보여준다.
             ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 124),
               child: OutlinedButton(
-                onPressed: _streaming ? null : _pickModel,
+                onPressed: (_streaming || _generatingImage)
+                    ? null
+                    : ((_conv?.isImageChat ?? false)
+                        ? _pickImageChatModels
+                        : _isImageConv
+                            ? _pickImageModel
+                            : _pickModel),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: _textDim,
                   side: const BorderSide(color: _border),
@@ -912,10 +1372,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(Icons.tune, size: 16),
+                    Icon(_isImageConv ? Icons.image_outlined : Icons.tune,
+                        size: 16),
                     const SizedBox(width: 4),
                     Flexible(
-                      child: Text(_modelLabel,
+                      child: Text(_isImageConv ? _imageModelLabel : _modelLabel,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(fontSize: 12)),
@@ -932,7 +1393,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 maxLines: 5,
                 textInputAction: TextInputAction.newline,
                 decoration: InputDecoration(
-                  hintText: '메시지를 입력하세요…',
+                  hintText: (_conv?.isImagePrompt ?? false)
+                      ? '이미지 프롬프트를 입력하세요 (영문 권장)…'
+                      : (_conv?.isImageChat ?? false)
+                          ? '만들 이미지를 설명하세요…'
+                          : '메시지를 입력하세요…',
                   filled: true,
                   fillColor: _panel,
                   contentPadding:
@@ -953,14 +1418,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               width: 46,
               height: 46,
               child: FilledButton(
-                onPressed: _streaming ? null : _send,
+                onPressed: (_streaming || _generatingImage) ? null : _send,
                 style: FilledButton.styleFrom(
                   backgroundColor: _accent,
                   padding: EdgeInsets.zero,
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12)),
                 ),
-                child: _streaming
+                child: (_streaming || _generatingImage)
                     ? const SizedBox(
                         width: 18,
                         height: 18,
@@ -1000,18 +1465,38 @@ class _ScrollToBottomButton extends StatelessWidget {
 }
 
 class _EmptyState extends StatelessWidget {
-  const _EmptyState();
+  final String kind; // 'chat' | 'image_prompt' | 'image_chat'
+  const _EmptyState({this.kind = 'chat'});
   @override
   Widget build(BuildContext context) {
-    return const Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text('무엇을 도와드릴까요?',
-              style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-          SizedBox(height: 8),
-          Text('xAI Grok에게 무엇이든 물어보세요.', style: TextStyle(color: _textDim)),
-        ],
+    final isPrompt = kind == 'image_prompt';
+    final isChatImage = kind == 'image_chat';
+    final title = isPrompt
+        ? '프롬프트로 이미지 만들기'
+        : isChatImage
+            ? '대화로 이미지 만들기'
+            : '무엇을 도와드릴까요?';
+    final sub = isPrompt
+        ? '생성할 이미지의 프롬프트를 직접 입력하세요 (영문 권장).'
+        : isChatImage
+            ? '만들고 싶은 이미지를 설명하면 AI가 프롬프트를 만들어 드려요.'
+            : '선택한 AI 모델에게 무엇이든 물어보세요.';
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(title,
+                textAlign: TextAlign.center,
+                style:
+                    const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            Text(sub,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: _textDim)),
+          ],
+        ),
       ),
     );
   }
@@ -1073,11 +1558,82 @@ class _Bubble extends StatelessWidget {
                   if (isPending) _pendingLine(),
                   if (isFailed) _failedLine(),
                   if (u != null) _usageLine(u),
+                  if (message.imagePath != null)
+                    _downloadButton(context, message.imagePath!),
+                  if (message.content.trim().isNotEmpty)
+                    _copyButton(context),
                 ],
               ),
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  // 생성된 이미지를 기기 갤러리에 저장(다운로드)하는 버튼.
+  Widget _downloadButton(BuildContext context, String path) {
+    return Align(
+      alignment: Alignment.centerRight,
+      child: TextButton.icon(
+        onPressed: () => _downloadImage(context, path),
+        icon: const Icon(Icons.download, size: 16),
+        label: const Text('다운로드'),
+        style: TextButton.styleFrom(
+          foregroundColor: _accent,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          minimumSize: const Size(0, 32),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _downloadImage(BuildContext context, String path) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await Gal.putImage(path);
+      messenger.showSnackBar(const SnackBar(
+        content: Text('갤러리에 저장했습니다'),
+        duration: Duration(seconds: 1),
+      ));
+    } on GalException catch (e) {
+      messenger.showSnackBar(SnackBar(
+        content: Text('저장 실패: ${e.type.message}'),
+        backgroundColor: Colors.red[900],
+      ));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(
+        content: Text('저장 실패: $e'),
+        backgroundColor: Colors.red[900],
+      ));
+    }
+  }
+
+  // 메시지 본문을 클립보드로 복사하는 버튼(텍스트가 있을 때만 노출).
+  Widget _copyButton(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerRight,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(6),
+        onTap: () {
+          Clipboard.setData(ClipboardData(text: message.content));
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('복사되었습니다'),
+            duration: Duration(seconds: 1),
+          ));
+        },
+        child: const Padding(
+          padding: EdgeInsets.only(top: 6, left: 6, right: 2),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.copy, size: 14, color: _textDim),
+              SizedBox(width: 4),
+              Text('복사', style: TextStyle(fontSize: 11, color: _textDim)),
+            ],
+          ),
+        ),
       ),
     );
   }

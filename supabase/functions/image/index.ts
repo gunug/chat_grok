@@ -12,25 +12,164 @@
 // The xAI key never reaches the app. Same auth + credit gate as "chat".
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { encodeBase64 } from "jsr:@std/encoding/base64";
 
 const SERVICE_KEY = "chat_grok";
 const TRIAL_CREDITS = 300;
 const MIN_BALANCE_CREDITS = 1;
 
 const XAI_BASE_URL = Deno.env.get("XAI_BASE_URL") ?? "https://api.x.ai/v1";
-const XAI_MODEL = Deno.env.get("XAI_MODEL") ?? "grok-3";
-const XAI_IMAGE_MODEL = Deno.env.get("XAI_IMAGE_MODEL") ??
+const XAI_MODEL = Deno.env.get("XAI_MODEL") ?? "grok-3"; // compose(텍스트)용
+const OPENAI_BASE_URL = Deno.env.get("OPENAI_BASE_URL") ??
+  "https://api.openai.com/v1";
+// 클라이언트가 이미지 모델을 안 보낼 때의 기본값(cg_image_models.id 여야 함).
+const DEFAULT_IMAGE_MODEL = Deno.env.get("XAI_IMAGE_MODEL") ??
   "grok-imagine-image-quality";
 
-// Flat per-image USD price (xAI bills per image — and still bills on a
-// moderation block). Picked by model; override with XAI_IMAGE_USD.
-const IMAGE_PRICE_USD: Record<string, number> = {
-  "grok-imagine-image-quality": 0.05,
-  "grok-imagine-image": 0.02,
-  "grok-2-image": 0.07,
-};
-const IMAGE_COST_USD = Number(Deno.env.get("XAI_IMAGE_USD")) ||
-  IMAGE_PRICE_USD[XAI_IMAGE_MODEL] || 0.05;
+// cg_image_models 한 행(이미지 모델 카탈로그 + 1장당 정액 USD).
+interface ImageModel {
+  id: string;
+  provider: string; // 'openai' | 'xai'
+  price_usd: number;
+  size: string | null;
+  quality: string | null;
+}
+
+// 요청된(또는 기본) 이미지 모델을 cg_image_models에서 검증·로드. 없거나
+// 비활성이면 null. service_role 클라이언트로 호출(RLS 우회).
+// deno-lint-ignore no-explicit-any
+async function loadImageModel(admin: any, id: string): Promise<ImageModel | null> {
+  const wanted = (id || DEFAULT_IMAGE_MODEL).trim();
+  const { data } = await admin
+    .from("cg_image_models")
+    .select("id, provider, price_usd, size, quality, enabled")
+    .eq("id", wanted)
+    .maybeSingle();
+  if (!data || data.enabled === false) return null;
+  return {
+    id: data.id,
+    provider: data.provider,
+    price_usd: Number(data.price_usd),
+    size: data.size ?? null,
+    quality: data.quality ?? null,
+  };
+}
+
+// cg_models 한 행(프롬프트 생성에 쓰는 텍스트 모델 + 단가). 채팅과 동일 카탈로그.
+interface TextModel {
+  id: string;
+  provider: string; // 'openai' | 'xai'
+  input_per_mtok: number | null;
+  output_per_mtok: number | null;
+  cached_input_per_mtok: number | null;
+}
+
+// 요청된 프롬프트 모델을 cg_models에서 검증·로드. 없거나 비활성이면 null
+// (호출부에서 기본 xAI 모델로 폴백).
+// deno-lint-ignore no-explicit-any
+async function loadTextModel(admin: any, id: string): Promise<TextModel | null> {
+  const wanted = (id || "").trim();
+  if (!wanted) return null;
+  const { data } = await admin
+    .from("cg_models")
+    .select(
+      "id, provider, input_per_mtok, output_per_mtok, cached_input_per_mtok, enabled",
+    )
+    .eq("id", wanted)
+    .maybeSingle();
+  if (!data || data.enabled === false) return null;
+  return {
+    id: data.id,
+    provider: data.provider,
+    input_per_mtok: data.input_per_mtok != null ? Number(data.input_per_mtok) : null,
+    output_per_mtok: data.output_per_mtok != null ? Number(data.output_per_mtok) : null,
+    cached_input_per_mtok:
+      data.cached_input_per_mtok != null ? Number(data.cached_input_per_mtok) : null,
+  };
+}
+
+// provider별 "실제 보유 모델 id" 캐시(웜 인스턴스 간 재사용). 목록 조회는
+// 메타데이터라 토큰 과금 없음. null = 조회 실패(이 경우 fail-open: 숨기지 않음).
+const MODELS_CACHE_MS = 30 * 60 * 1000;
+let _modelsCache: { at: number; openai: Set<string> | null; xai: Set<string> | null } =
+  { at: 0, openai: null, xai: null };
+
+async function fetchAvailableModelIds() {
+  const now = Date.now();
+  if (
+    now - _modelsCache.at < MODELS_CACHE_MS &&
+    (_modelsCache.openai || _modelsCache.xai)
+  ) {
+    return _modelsCache;
+  }
+  // OpenAI: /v1/models (전체 모델). 이미지 여부와 무관하게 id 집합으로 사용.
+  let openai: Set<string> | null = null;
+  try {
+    const key = Deno.env.get("OPENAI_API_KEY");
+    if (key) {
+      const r = await fetch(`${OPENAI_BASE_URL}/models`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      if (r.ok) {
+        const j = await r.json();
+        // deno-lint-ignore no-explicit-any
+        openai = new Set((j.data ?? []).map((m: any) => String(m.id)));
+      }
+    }
+  } catch (_) { /* fail-open */ }
+  // xAI: /v1/image-generation-models (이미지 모델만). id + aliases 포함.
+  let xai: Set<string> | null = null;
+  try {
+    const r = await fetch(`${XAI_BASE_URL}/image-generation-models`, {
+      headers: { Authorization: `Bearer ${Deno.env.get("XAI_API_KEY")}` },
+    });
+    if (r.ok) {
+      const j = await r.json();
+      const s = new Set<string>();
+      // deno-lint-ignore no-explicit-any
+      for (const m of (j.models ?? []) as any[]) {
+        if (m.id) s.add(String(m.id));
+        for (const a of (m.aliases ?? [])) s.add(String(a));
+      }
+      xai = s;
+    }
+  } catch (_) { /* fail-open */ }
+  _modelsCache = { at: now, openai, xai };
+  return _modelsCache;
+}
+
+// cg_image_models(enabled) ∩ provider 실시간 보유 목록을 반환.
+// deno-lint-ignore no-explicit-any
+async function listAvailableImageModels(admin: any): Promise<Response> {
+  const { data: rows } = await admin
+    .from("cg_image_models")
+    .select("id, provider, label, price_usd, sort")
+    .eq("enabled", true)
+    .order("sort");
+  const candidates = (rows ?? []);
+  const cache = await fetchAvailableModelIds();
+  const rank = (p: string) => (p === "openai" ? 0 : p === "xai" ? 1 : 2);
+  const models = candidates
+    // deno-lint-ignore no-explicit-any
+    .filter((c: any) => {
+      const set = c.provider === "openai" ? cache.openai : cache.xai;
+      if (set == null) return true; // 목록 조회 실패 → 숨기지 않음
+      return set.has(c.id);
+    })
+    // 정렬: provider(OpenAI→xAI) → 가격 내림차순(비싼 것 위로).
+    // deno-lint-ignore no-explicit-any
+    .sort((a: any, b: any) =>
+      rank(a.provider) - rank(b.provider) ||
+      Number(b.price_usd) - Number(a.price_usd))
+    // deno-lint-ignore no-explicit-any
+    .map((c: any) => ({
+      id: c.id,
+      provider: c.provider,
+      label: c.label,
+      price_usd: Number(c.price_usd),
+    }));
+  return json({ models });
+}
 
 // The scene stays faithful; only the WORDING is kept moderation-safe. xAI's
 // image filter rejects on its Acceptable Use Policy (sexual/intimate real
@@ -81,6 +220,8 @@ Deno.serve(async (req: Request) => {
     mode?: string;
     messages?: Array<{ role: string; content: string }>;
     prompt?: string;
+    model?: string; // cg_image_models.id (render 대상 이미지 모델)
+    promptModel?: string; // cg_models.id (compose 프롬프트 생성 텍스트 모델)
   };
   try {
     body = await req.json();
@@ -102,6 +243,10 @@ Deno.serve(async (req: Request) => {
   if (!user) return json({ error: "unauthorized" }, 401);
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
+
+  // mode: models — 사용 가능한 이미지 모델 목록(크레딧 게이트 불필요).
+  // cg_image_models(enabled) ∩ provider 실시간 보유 목록. 토큰 과금 없음.
+  if (mode === "models") return await listAvailableImageModels(admin);
 
   await admin.rpc("app_register_service", {
     p_user: user.id,
@@ -134,15 +279,32 @@ Deno.serve(async (req: Request) => {
       content: String(m.content ?? "").slice(0, 4000),
     }));
 
+    // 프롬프트 생성 모델: 요청값(cg_models) 검증 후 provider 라우팅. 못 찾으면
+    // 기본 xAI 모델로 폴백(과금 스푸핑 방지 — 단가는 항상 카탈로그/응답 기준).
+    const tm = await loadTextModel(admin, body.promptModel ?? "");
+    const textProvider = tm?.provider ?? "xai";
+    const textModelId = tm?.id ?? XAI_MODEL;
+    const isOpenaiText = textProvider === "openai";
+    const TEXT_BASE_URL = isOpenaiText ? OPENAI_BASE_URL : XAI_BASE_URL;
+    const TEXT_API_KEY = isOpenaiText
+      ? Deno.env.get("OPENAI_API_KEY")
+      : XAI_API_KEY;
+    if (!TEXT_API_KEY) {
+      return json(
+        { error: `${isOpenaiText ? "OPENAI_API_KEY" : "XAI_API_KEY"} secret is not set.` },
+        500,
+      );
+    }
+
     try {
-      const r = await fetch(`${XAI_BASE_URL}/chat/completions`, {
+      const r = await fetch(`${TEXT_BASE_URL}/chat/completions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${XAI_API_KEY}`,
+          Authorization: `Bearer ${TEXT_API_KEY}`,
         },
         body: JSON.stringify({
-          model: XAI_MODEL,
+          model: textModelId,
           messages: [
             { role: "system", content: PROMPT_SYSTEM },
             ...recent,
@@ -165,19 +327,31 @@ Deno.serve(async (req: Request) => {
       }
       const j = await r.json();
 
-      // grok-3 호출이 성공했으면 토큰 비용이 이미 발생했으므로, 프롬프트가
-      // 비어 실패하더라도 먼저 차감한다(서비스가 API 비용을 떠안지 않음).
+      // 호출이 성공했으면 토큰 비용이 이미 발생했으므로, 프롬프트가 비어
+      // 실패하더라도 먼저 차감한다(서비스가 API 비용을 떠안지 않음).
+      //  • xAI: 응답의 cost_in_usd_ticks 사용.
+      //  • OpenAI: cg_models 토큰 단가로 계산(채팅 함수와 동일 공식).
       const u = j.usage ?? {};
-      const promptCostUsd = u.cost_in_usd_ticks != null
-        ? u.cost_in_usd_ticks / 1e10
-        : 0;
+      let promptCostUsd = 0;
+      if (u.cost_in_usd_ticks != null) {
+        promptCostUsd = u.cost_in_usd_ticks / 1e10;
+      } else if (tm && tm.input_per_mtok != null) {
+        const promptTok = u.prompt_tokens ?? 0;
+        const cachedTok = u.prompt_tokens_details?.cached_tokens ?? 0;
+        const nonCached = Math.max(0, promptTok - cachedTok);
+        const cachedRate = tm.cached_input_per_mtok ?? tm.input_per_mtok;
+        const outRate = tm.output_per_mtok ?? 0;
+        promptCostUsd = nonCached / 1e6 * tm.input_per_mtok +
+          cachedTok / 1e6 * cachedRate +
+          (u.completion_tokens ?? 0) / 1e6 * outRate;
+      }
       let balanceCredits = balance;
       try {
         const { data: nb } = await admin.rpc("app_record_usage", {
           p_user: user.id,
           p_service: SERVICE_KEY,
-          p_provider: "xai",
-          p_model: XAI_MODEL,
+          p_provider: textProvider,
+          p_model: textModelId,
           p_action: "image_prompt",
           p_prompt_tokens: u.prompt_tokens ?? 0,
           p_completion_tokens: u.completion_tokens ?? 0,
@@ -207,14 +381,18 @@ Deno.serve(async (req: Request) => {
         }, 502);
       }
 
-      // 이미지 생성(render) 시 차감될 크레딧 미리 계산(동일 비용 → 동일 공식).
+      // 이미지 생성(render) 시 차감될 크레딧 미리 계산 — 선택한 이미지 모델의
+      // 1장당 가격으로 환산(없으면 기본 모델). 모델을 못 찾으면 null.
       let imageCredits: number | null = null;
       try {
-        const { data: ic } = await admin.rpc("app_usage_credits", {
-          p_service: SERVICE_KEY,
-          p_cost_micros: Math.ceil(IMAGE_COST_USD * 1e6),
-        });
-        if (ic != null) imageCredits = Number(ic);
+        const im = await loadImageModel(admin, body.model ?? "");
+        if (im) {
+          const { data: ic } = await admin.rpc("app_usage_credits", {
+            p_service: SERVICE_KEY,
+            p_cost_micros: Math.ceil(im.price_usd * 1e6),
+          });
+          if (ic != null) imageCredits = Number(ic);
+        }
       } catch (e) {
         console.error("app_usage_credits preview failed:", e);
       }
@@ -239,38 +417,106 @@ Deno.serve(async (req: Request) => {
     const prompt = (body.prompt ?? "").toString().trim();
     if (!prompt) return json({ error: "prompt is required" }, 400);
 
+    // 모델 검증 + provider 라우팅(허용목록 cg_image_models). 임의 모델/과금 스푸핑 차단.
+    const im = await loadImageModel(admin, body.model ?? "");
+    if (!im) return json({ error: "unknown or disabled image model" }, 400);
+    const isOpenai = im.provider === "openai";
+    const API_KEY = isOpenai
+      ? Deno.env.get("OPENAI_API_KEY")
+      : XAI_API_KEY;
+    if (!API_KEY) {
+      return json(
+        { error: `${isOpenai ? "OPENAI_API_KEY" : "XAI_API_KEY"} secret is not set.` },
+        500,
+      );
+    }
+    const BASE_URL = isOpenai ? OPENAI_BASE_URL : XAI_BASE_URL;
+
     let blocked = false;
+    let blockReason = "";
     let imageB64 = "";
     let revisedPrompt = prompt;
     try {
-      const r = await fetch(`${XAI_BASE_URL}/images/generations`, {
+      // 요청 본문(OpenAI/xAI 모두 OpenAI 호환 /images/generations).
+      // deno-lint-ignore no-explicit-any
+      const reqBody: Record<string, any> = { model: im.id, prompt, n: 1 };
+      if (isOpenai) {
+        // OpenAI 이미지 API는 response_format 인자를 받지 않는다(gpt-image-1은
+        // 항상 b64_json, dall-e-3은 기본 url). 응답 파싱에서 둘 다 처리한다.
+        if (im.size) reqBody.size = im.size;
+        if (im.quality) reqBody.quality = im.quality;
+      } else {
+        // xAI는 OpenAI 호환이며 b64_json을 지원한다.
+        reqBody.response_format = "b64_json";
+      }
+      const r = await fetch(`${BASE_URL}/images/generations`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${XAI_API_KEY}`,
+          Authorization: `Bearer ${API_KEY}`,
         },
-        body: JSON.stringify({
-          model: XAI_IMAGE_MODEL,
-          prompt,
-          n: 1,
-          response_format: "b64_json",
-        }),
+        body: JSON.stringify(reqBody),
       });
       if (r.ok) {
         const j = await r.json();
         const first = j.data?.[0] ?? {};
-        imageB64 = first.b64_json ?? "";
+        if (first.b64_json) {
+          imageB64 = first.b64_json;
+        } else if (first.url) {
+          // dall-e-3 기본 응답은 URL → 바이트를 받아 base64로 변환.
+          const ir = await fetch(first.url);
+          if (ir.ok) {
+            imageB64 = encodeBase64(new Uint8Array(await ir.arrayBuffer()));
+          }
+        }
         if (first.revised_prompt) revisedPrompt = first.revised_prompt;
-      } else if (r.status === 400) {
-        // 모더레이션 차단 — xAI는 그래도 과금하므로 아래에서 크레딧 차감.
-        blocked = true;
       } else {
-        // 그 외 오류는 과금하지 않고 그대로 전달.
-        const detail = await r.text().catch(() => "");
-        return json(
-          { error: `image step failed (${r.status})`, detail: detail.slice(0, 500) },
-          502,
-        );
+        // 오류 본문에서 실제 코드/메시지를 추출(가능하면).
+        const rawErr = await r.text().catch(() => "");
+        let code = "";
+        let message = rawErr;
+        try {
+          const pe = JSON.parse(rawErr);
+          // deno-lint-ignore no-explicit-any
+          const eo: any = pe.error ?? pe;
+          code = (eo?.code ?? "").toString();
+          message = (eo?.message ?? eo?.error ?? rawErr).toString();
+        } catch { /* JSON 아님 → rawErr 사용 */ }
+
+        // 콘텐츠/모더레이션 차단인지 판정.
+        //  • xAI: 400을 모더레이션 차단으로 간주(차단돼도 과금됨).
+        //  • OpenAI: code/메시지가 콘텐츠 정책일 때만 차단. 403(조직 미인증)·
+        //    404(미보유)·기타 400(잘못된 요청)은 차단이 아니라 실제 에러로 전달.
+        const isModeration = !isOpenai
+          ? r.status === 400
+          : (r.status === 400 &&
+            (code === "moderation_blocked" ||
+              code === "content_policy_violation" ||
+              /content[_ ]?policy|moderation|safety|flagged|violat|sensitive/i
+                .test(message)));
+
+        if (isModeration) {
+          blocked = true;
+          blockReason = message.slice(0, 300);
+        } else {
+          // 모델 미보유("does not exist"/404)면 카탈로그에서 자동 비활성화 →
+          // 다음부터 picker에 안 보인다(best-effort, 과금 없음).
+          const notFound = r.status === 404 ||
+            /does not exist|model_not_found|not[_ ]?found/i.test(message);
+          if (notFound) {
+            admin.from("cg_image_models").update({ enabled: false })
+              .eq("id", im.id).then(() => {}, () => {});
+          }
+          // 과금 없이 실제 원인(조직 인증/접근 권한/요청 오류 등)을 그대로 전달.
+          return json(
+            {
+              error: `image step failed (${r.status})`,
+              detail: message.slice(0, 500),
+              code,
+            },
+            r.status === 402 ? 502 : r.status, // 402는 크레딧 게이트 전용이라 회피
+          );
+        }
       }
     } catch (e) {
       return json({ error: "image step error", detail: String(e) }, 502);
@@ -280,29 +526,33 @@ Deno.serve(async (req: Request) => {
       return json({ error: "no image returned" }, 502);
     }
 
-    // 크레딧 차감: 성공이든 차단이든 이미지 정액 비용 부과.
+    // 과금 정책: xAI는 차단되어도 과금(실제 청구됨), OpenAI는 차단 시 과금 안 함.
+    const shouldCharge = !blocked || !isOpenai;
     let balanceCredits = balance;
-    try {
-      const { data: nb } = await admin.rpc("app_record_usage", {
-        p_user: user.id,
-        p_service: SERVICE_KEY,
-        p_provider: "xai",
-        p_model: XAI_IMAGE_MODEL,
-        p_action: blocked ? "image_blocked" : "image",
-        p_prompt_tokens: 0,
-        p_completion_tokens: 0,
-        p_cost_micros: Math.ceil(IMAGE_COST_USD * 1e6),
-      });
-      if (nb != null) balanceCredits = nb as number;
-    } catch (e) {
-      console.error("app_record_usage failed:", e);
+    if (shouldCharge) {
+      try {
+        const { data: nb } = await admin.rpc("app_record_usage", {
+          p_user: user.id,
+          p_service: SERVICE_KEY,
+          p_provider: im.provider,
+          p_model: im.id,
+          p_action: blocked ? "image_blocked" : "image",
+          p_prompt_tokens: 0,
+          p_completion_tokens: 0,
+          p_cost_micros: Math.ceil(im.price_usd * 1e6),
+        });
+        if (nb != null) balanceCredits = nb as number;
+      } catch (e) {
+        console.error("app_record_usage failed:", e);
+      }
     }
 
     return json({
       blocked,
+      reason: blocked && blockReason ? blockReason : null,
       imageB64: blocked ? null : imageB64,
       revisedPrompt: blocked ? null : revisedPrompt,
-      costUsd: IMAGE_COST_USD,
+      costUsd: shouldCharge ? im.price_usd : 0,
       creditsCharged: balance - balanceCredits,
       balanceCredits,
     });

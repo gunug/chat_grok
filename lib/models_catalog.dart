@@ -19,21 +19,62 @@ class ChatModel {
   });
 }
 
-/// Fetches enabled models ordered by `sort`. Returns [] on error (UI falls back
-/// to showing the stored model id).
+/// Fetches the chat models that are BOTH enabled in our catalog AND actually
+/// available on the provider account (server validates via provider model-list
+/// APIs — no tokens billed). Already sorted (OpenAI→xAI, price desc). Returns []
+/// on error (UI falls back to showing the stored model id).
 Future<List<ChatModel>> fetchModels() async {
   try {
-    final rows = await Supabase.instance.client
-        .from('cg_models')
-        .select('id, provider, label, sort, input_per_mtok, output_per_mtok')
-        .order('sort');
-    return (rows as List)
+    final res = await Supabase.instance.client.functions
+        .invoke('chat', body: {'mode': 'models'});
+    final data = res.data;
+    final list = (data is Map ? data['models'] : null) as List?;
+    if (list == null) return [];
+    return list
         .map((r) => ChatModel(
               id: r['id'] as String,
               provider: (r['provider'] as String?) ?? '',
               label: (r['label'] as String?) ?? r['id'] as String,
               inputRate: (r['input_per_mtok'] as num?)?.toDouble(),
               outputRate: (r['output_per_mtok'] as num?)?.toDouble(),
+            ))
+        .toList();
+  } catch (_) {
+    return [];
+  }
+}
+
+/// One selectable image-generation model (cg_image_models row).
+class ImageModel {
+  final String id;
+  final String provider; // 'openai' | 'xai'
+  final String label;
+  final double? priceUsd; // flat USD per generated image (display estimate)
+  ImageModel({
+    required this.id,
+    required this.provider,
+    required this.label,
+    this.priceUsd,
+  });
+}
+
+/// Fetches the image models that are BOTH enabled in our catalog AND actually
+/// available on the provider account (server validates via provider model-list
+/// APIs — no tokens billed). Returns [] on error (UI falls back to the
+/// stored/default image model id).
+Future<List<ImageModel>> fetchImageModels() async {
+  try {
+    final res = await Supabase.instance.client.functions
+        .invoke('image', body: {'mode': 'models'});
+    final data = res.data;
+    final list = (data is Map ? data['models'] : null) as List?;
+    if (list == null) return [];
+    return list
+        .map((r) => ImageModel(
+              id: r['id'] as String,
+              provider: (r['provider'] as String?) ?? '',
+              label: (r['label'] as String?) ?? r['id'] as String,
+              priceUsd: (r['price_usd'] as num?)?.toDouble(),
             ))
         .toList();
   } catch (_) {
