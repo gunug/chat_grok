@@ -20,8 +20,9 @@ declare const EdgeRuntime:
   | undefined;
 
 const SERVICE_KEY = "chat_grok";
-const TRIAL_CREDITS = 300; // 첫 사용 체험 크레딧 (1 credit = 1원 by config)
+const TRIAL_CREDITS = 0; // 체험 크레딧 비활성(어뷰징 차단). 충전한 계정만 사용 가능
 const MIN_BALANCE_CREDITS = 1; // 호출 전 최소 잔액(크레딧)
+const MAX_OUTPUT_TOKENS = 4096; // 1요청 출력 상한(비용 천장 → 1크레딧 어뷰징 완화)
 const PENDING_TTL_MS = 2 * 24 * 60 * 60 * 1000; // 버려진 행 정리 기준(2일)
 
 const XAI_BASE_URL = Deno.env.get("XAI_BASE_URL") ?? "https://api.x.ai/v1";
@@ -284,6 +285,40 @@ Deno.serve(async (req: Request) => {
     ? messages
     : [{ role: "system", content: SYSTEM_PROMPT }, ...messages];
 
+  // --- 선승인(예상비용 게이트) ---------------------------------------------
+  // 1크레딧만 보고 통과시키면 거대 요청 1발로 잔액보다 큰 비용이 나갈 수 있다.
+  // 호출 전 입력량을 보수적으로 추정(한글 밀도 고려: 글자수/2)하고, 출력은 상한
+  // (MAX_OUTPUT_TOKENS)으로 잡아 예상비용을 크레딧으로 환산 → 잔액이 그만큼
+  // 없으면 막는다. 추정은 게이트 전용이고, 실제 차감은 호출 후 real usage 사용.
+  const estChars = payloadMessages.reduce(
+    (n, m) => n + String(m.content ?? "").length,
+    0,
+  );
+  const estInputTokens = Math.ceil(estChars / 2); // 보수적 과대추정(한글 기준)
+  const estInRate = modelRow.input_per_mtok ?? 5; // null(응답과금 모델)이면 보수적 기본
+  const estOutRate = modelRow.output_per_mtok ?? 15;
+  const estCostUsd = estInputTokens / 1e6 * estInRate +
+    MAX_OUTPUT_TOKENS / 1e6 * estOutRate;
+  const { data: estC } = await admin.rpc("app_usage_credits", {
+    p_service: SERVICE_KEY,
+    p_cost_micros: Math.ceil(estCostUsd * 1e6),
+  });
+  const estNeedCredits = Math.max(MIN_BALANCE_CREDITS, Number(estC ?? 0));
+  if (balance < estNeedCredits) {
+    if (persist) {
+      await admin.from("cg_pending_chat").update({
+        status: "error",
+        error: "insufficient_credit_estimate",
+        updated_at: new Date().toISOString(),
+      }).eq("request_id", requestId);
+    }
+    return json({
+      error: "insufficient_credit_estimate",
+      balanceCredits: balance,
+      requiredCredits: estNeedCredits,
+    }, 402);
+  }
+
   const upstream = await fetch(`${BASE_URL}/chat/completions`, {
     method: "POST",
     headers: {
@@ -295,6 +330,11 @@ Deno.serve(async (req: Request) => {
       messages: payloadMessages,
       stream: true,
       stream_options: { include_usage: true },
+      // 출력 토큰 상한 → 1요청 최대 비용을 묶는다. 신형 OpenAI(gpt-5 등)는
+      // max_tokens를 거부하고 max_completion_tokens를 쓰므로 provider별로 분기.
+      ...(isOpenai
+        ? { max_completion_tokens: MAX_OUTPUT_TOKENS }
+        : { max_tokens: MAX_OUTPUT_TOKENS }),
     }),
   });
 

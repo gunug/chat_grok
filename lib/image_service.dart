@@ -60,7 +60,7 @@ class ImageService {
 
   static Never _throwFor(http.Response resp) {
     if (resp.statusCode == 402) {
-      throw ImageError('크레딧이 부족합니다. 충전 후 다시 시도하세요.');
+      throw ImageError('토큰 잔여량이 AI기능을 수행하기에 부족합니다.\n충전 후 다시 시도하세요.');
     }
     Map<String, dynamic>? j;
     try {

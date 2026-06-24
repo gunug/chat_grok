@@ -63,16 +63,36 @@ class ChatService {
         final body = await resp.stream.bytesToString();
         // 크레딧 부족은 별도 안내(충전 유도).
         if (resp.statusCode == 402) {
-          yield ChatEvent.error('크레딧이 부족합니다. 충전 후 다시 시도하세요.');
+          yield ChatEvent.error(
+              '토큰 잔여량이 AI기능을 수행하기에 부족합니다.\n충전 후 다시 시도하세요.');
           return;
         }
         String msg = 'HTTP ${resp.statusCode}';
+        String raw = '';
         try {
           final j = jsonDecode(body);
           msg = j['error']?.toString() ?? msg;
-          if (j['detail'] != null) msg = '$msg: ${j['detail']}';
+          if (j['detail'] != null) raw = j['detail'].toString();
+          if (raw.isNotEmpty) msg = '$msg: $raw';
         } catch (_) {
-          if (body.isNotEmpty) msg = '$msg: ${body.substring(0, body.length.clamp(0, 300))}';
+          if (body.isNotEmpty) {
+            raw = body;
+            msg = '$msg: ${body.substring(0, body.length.clamp(0, 300))}';
+          }
+        }
+        // 제공자(xAI/OpenAI) 잔액 소진 = 운영자가 API 비용을 충전해야 함.
+        // 업스트림 429/402/403 또는 billing/quota/credit 류 메시지를 잡아낸다.
+        final probe = '$msg $raw'.toLowerCase();
+        final providerOutOfFunds = resp.statusCode == 502 &&
+            (RegExp(r'\b(402|403|429)\b').hasMatch(probe) ||
+                RegExp(r'quota|billing|credit|insufficient|payment|balance|exceeded|rate.?limit')
+                    .hasMatch(probe));
+        if (providerOutOfFunds) {
+          yield ChatEvent.error(
+              '현재 서비스 이용이 일시 중단되었습니다.\n'
+              '운영자의 API 사용 잔액이 소진되어 비용 충전이 필요합니다. '
+              '잠시 후 다시 시도해 주세요.');
+          return;
         }
         yield ChatEvent.error(msg);
         return;

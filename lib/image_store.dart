@@ -98,6 +98,19 @@ class ImageStore {
     await _persist(items);
   }
 
+  /// Deletes many images (files + index entries) from the device.
+  static Future<void> deleteMany(Iterable<GalleryImage> images) async {
+    final paths = images.map((g) => g.path).toSet();
+    for (final img in images) {
+      try {
+        if (img.exists) await img.file.delete();
+      } catch (_) {/* file already gone */}
+    }
+    final items = await list();
+    items.removeWhere((g) => paths.contains(g.path));
+    await _persist(items);
+  }
+
   static Future<void> _persist(List<GalleryImage> items) async {
     final p = await _prefs;
     await p.setString(

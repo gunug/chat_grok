@@ -15,7 +15,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { encodeBase64 } from "jsr:@std/encoding/base64";
 
 const SERVICE_KEY = "chat_grok";
-const TRIAL_CREDITS = 300;
+const TRIAL_CREDITS = 0; // 체험 크레딧 비활성(어뷰징 차단). 충전한 계정만 사용 가능
 const MIN_BALANCE_CREDITS = 1;
 
 const XAI_BASE_URL = Deno.env.get("XAI_BASE_URL") ?? "https://api.x.ai/v1";
@@ -420,6 +420,23 @@ Deno.serve(async (req: Request) => {
     // 모델 검증 + provider 라우팅(허용목록 cg_image_models). 임의 모델/과금 스푸핑 차단.
     const im = await loadImageModel(admin, body.model ?? "");
     if (!im) return json({ error: "unknown or disabled image model" }, 400);
+
+    // 선승인(고정비): 이미지는 호출 전에 가격을 알 수 있으므로, 1크레딧 게이트가
+    // 아니라 "이 이미지의 실제 차감 크레딧"만큼 잔액이 있는지부터 막는다.
+    // (잔액 1로 비싼 1장을 공짜로 받는 어뷰징 차단. 채팅과 달리 비용이 고정.)
+    const { data: costC } = await admin.rpc("app_usage_credits", {
+      p_service: SERVICE_KEY,
+      p_cost_micros: Math.ceil(im.price_usd * 1e6),
+    });
+    const imageCostCredits = Math.max(1, Number(costC ?? 0));
+    if (balance < imageCostCredits) {
+      return json({
+        error: "insufficient_credit",
+        balanceCredits: balance,
+        requiredCredits: imageCostCredits,
+      }, 402);
+    }
+
     const isOpenai = im.provider === "openai";
     const API_KEY = isOpenai
       ? Deno.env.get("OPENAI_API_KEY")

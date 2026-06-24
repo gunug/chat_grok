@@ -21,6 +21,8 @@ class GalleryScreen extends StatefulWidget {
 class _GalleryScreenState extends State<GalleryScreen> {
   List<GalleryImage> _items = [];
   bool _loading = true;
+  bool _selecting = false;
+  final Set<String> _selected = {}; // selected image paths
 
   @override
   void initState() {
@@ -34,7 +36,86 @@ class _GalleryScreenState extends State<GalleryScreen> {
       setState(() {
         _items = items;
         _loading = false;
+        _selected.removeWhere((p) => !items.any((g) => g.path == p));
       });
+    }
+  }
+
+  void _enterSelect(GalleryImage img) {
+    setState(() {
+      _selecting = true;
+      _selected.add(img.path);
+    });
+  }
+
+  void _exitSelect() {
+    setState(() {
+      _selecting = false;
+      _selected.clear();
+    });
+  }
+
+  void _toggle(GalleryImage img) {
+    setState(() {
+      if (!_selected.remove(img.path)) _selected.add(img.path);
+      if (_selected.isEmpty) _selecting = false;
+    });
+  }
+
+  List<GalleryImage> get _selectedImages =>
+      _items.where((g) => _selected.contains(g.path)).toList();
+
+  Future<void> _downloadSelected() async {
+    final imgs = _selectedImages;
+    final messenger = ScaffoldMessenger.of(context);
+    int ok = 0, fail = 0;
+    for (final img in imgs) {
+      try {
+        await Gal.putImage(img.path);
+        ok++;
+      } catch (_) {
+        fail++;
+      }
+    }
+    _exitSelect();
+    if (!mounted) return;
+    messenger.showSnackBar(SnackBar(
+      content: Text(fail == 0
+          ? '$ok장을 갤러리에 저장했습니다'
+          : '$ok장 저장, $fail장 실패'),
+      duration: const Duration(seconds: 2),
+    ));
+  }
+
+  Future<void> _deleteSelected() async {
+    final imgs = _selectedImages;
+    if (imgs.isEmpty) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: _panel,
+        title: const Text('이미지 삭제'),
+        content: Text('${imgs.length}장을 기기에서 삭제할까요? 되돌릴 수 없습니다.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('삭제', style: TextStyle(color: Color(0xFFFF6B6B))),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await ImageStore.deleteMany(imgs);
+    _exitSelect();
+    await _reload();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${imgs.length}장을 삭제했습니다.')),
+      );
     }
   }
 
@@ -83,7 +164,37 @@ class _GalleryScreenState extends State<GalleryScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: _bg,
-      appBar: AppBar(title: const Text('이미지 갤러리')),
+      appBar: _selecting
+          ? AppBar(
+              leading: IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: _exitSelect,
+              ),
+              title: Text('${_selected.length}장 선택'),
+              actions: [
+                IconButton(
+                  icon: const Icon(Icons.download),
+                  tooltip: '다운로드',
+                  onPressed: _selected.isEmpty ? null : _downloadSelected,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline),
+                  tooltip: '삭제',
+                  onPressed: _selected.isEmpty ? null : _deleteSelected,
+                ),
+              ],
+            )
+          : AppBar(
+              title: const Text('이미지 갤러리'),
+              actions: [
+                if (_items.isNotEmpty)
+                  IconButton(
+                    icon: const Icon(Icons.checklist),
+                    tooltip: '선택',
+                    onPressed: () => setState(() => _selecting = true),
+                  ),
+              ],
+            ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _items.isEmpty
@@ -110,20 +221,55 @@ class _GalleryScreenState extends State<GalleryScreen> {
                     itemCount: _items.length,
                     itemBuilder: (_, i) {
                       final img = _items[i];
+                      final sel = _selected.contains(img.path);
                       return GestureDetector(
-                        onTap: () => _openViewer(img),
-                        onLongPress: () => _confirmDelete(img),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(10),
-                          child: Image.file(
-                            img.file,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, _, _) => Container(
-                              color: _panel,
-                              child: const Icon(Icons.broken_image,
-                                  color: _textDim),
+                        onTap: () =>
+                            _selecting ? _toggle(img) : _openViewer(img),
+                        onLongPress: () =>
+                            _selecting ? _toggle(img) : _enterSelect(img),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(10),
+                              child: Image.file(
+                                img.file,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, _, _) => Container(
+                                  color: _panel,
+                                  child: const Icon(Icons.broken_image,
+                                      color: _textDim),
+                                ),
+                              ),
                             ),
-                          ),
+                            if (_selecting)
+                              Positioned(
+                                top: 4,
+                                right: 4,
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: sel ? _accent : Colors.black54,
+                                  ),
+                                  padding: const EdgeInsets.all(2),
+                                  child: Icon(
+                                    sel
+                                        ? Icons.check_circle
+                                        : Icons.circle_outlined,
+                                    size: 20,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ),
+                            if (sel)
+                              DecoratedBox(
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: _accent, width: 2),
+                                  color: _accent.withValues(alpha: 0.18),
+                                ),
+                              ),
+                          ],
                         ),
                       );
                     },
